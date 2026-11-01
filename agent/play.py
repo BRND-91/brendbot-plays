@@ -883,6 +883,19 @@ class Player:
         self.tap(eb.KEY_RIGHT)
         self.tap(eb.KEY_A)
         self.run(150)
+        if self.g.callback2() != S.CB2_BAG_MAIN:
+            # same no-bag-open hazard as throw_ball: an eaten RIGHT leaves the chooser flag set and
+            # bag_position holds its last value with the bag closed, so the pocket walk below would
+            # tap into the Fight list. Dump state + png like the switch-stall path so the next
+            # occurrence is a fixture, then B out.
+            cb2 = self.g.callback2()
+            path = f"/tmp/rowe_item_nobag_{int(time.time())}"
+            with open(path + ".ss", "wb") as f:
+                f.write(self.e.save_state())
+            self.e.save_png(path + ".png")
+            print(f"  item: bag never opened (cb2 {cb2:#x}), backing out, state {path}.ss", flush=True)
+            self.tap(eb.KEY_B)
+            return
         for _ in range(6):
             pk = self.g.bag_position()[0]
             if pk == S.BAG_POCKET_MEDICINE:
