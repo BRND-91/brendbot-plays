@@ -194,8 +194,11 @@ def recommend(status: dict, graph: map_graph.MapGraph) -> tuple:
         grass = grind_map(graph, blocked, anchor, cap)
         return {"mode": "grind", "map": grass, "cap": cap}, f"party {len(party)}/6, lowest attacker L{low} vs cap {cap}, grind {grass} toward {list(anchor)}"
     if not unbeaten:
+        dest = (0, 8)  # Ever Grande City, the post-badge endgame target
+        if here != dest and graph.route(here, dest, field_moves=frozenset(status.get("field_moves", []))) is not None:
+            return {"mode": "travel", "to": list(dest)}, f"at cap {cap}, all Hoenn gyms beaten, travelling to Ever Grande {list(dest)}"
         grass = grind_map(graph, blocked, anchor, None)
-        return {"mode": "grind", "map": grass, "cap": None}, f"at cap {cap}, all Hoenn gyms beaten, holding on {grass}"
+        return {"mode": "grind", "map": grass, "cap": None}, f"at cap {cap}, all Hoenn gyms beaten, no route to {list(dest)}, holding on {grass}"
     if gym is None:
         target = min(unbeaten, key=lambda g: GYM_BADGE[g])
         return {"mode": "explore", "to": list(target), "cap": None}, f"at cap {cap}, no gym reachable over world edges, exploring toward {list(target)}"

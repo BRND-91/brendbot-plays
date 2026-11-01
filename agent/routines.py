@@ -113,25 +113,25 @@ class Errands:
         "Would you like to Dive?" prompt, and read the warp. "map_changed", "battle", "stuck", or
         "unreachable".
 
-        DIR_EMERGE surfaces from an underwater map: pressedBButton runs the emerge script, which
-        warps to the surface point this map's setdivewarp set (Sootopolis, from (24, 5)). Most open
-        tiles emerge; a few under land refuse, so the current tile then the nearest reachable ones
-        are tried until the map changes."""
+        DIR_EMERGE surfaces from an underwater map through a yes/no dialogue: B opens "Would you
+        like to surface?", A answers YES on the default cursor, then the warp follows the map's
+        EMERGE connection or its setdivewarp point. emerge_tiles drops the back-warp tile and the
+        two no-surfacing behaviors, nearest first, until one tile warps."""
         if direction == rowe_map.DIR_EMERGE:
             before = self.map_id()
             grid = Grid(self.e)
             grid.tools = tools
             x, y, *_ = self.g.position()
-            nearby = sorted((t for t in grid.reachable((x, y), surf) if t != (x, y)),
-                            key=lambda t: abs(t[0] - x) + abs(t[1] - y))
-            for tile in [(x, y)] + nearby[:12]:  # 12 fallbacks past the entry tile, for an unable-to-emerge spot
+            for tile in grid.emerge_tiles((x, y), surf)[:13]:
                 if tile != (x, y):
                     r = self.nav.walk_to(tile, surf=surf, tools=tools)
                     if r == "battle":
                         return r
                     if r != "arrived":
                         continue
-                self.run(24, eb.KEY_B)
+                self.run(24, eb.KEY_B)   # "Would you like to surface?" yes/no, cursor on YES
+                self.run(60, 0)          # the surface prompt is two lines; A before it finishes
+                self.run(24, eb.KEY_A)   # opening advances the text instead of selecting YES
                 self.run(120, 0)
                 if self._landed(before):
                     return "map_changed"
