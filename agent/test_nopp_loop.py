@@ -14,6 +14,8 @@ import types
 import emu_boot as eb
 import play
 
+IDLE = next(iter(play.INTRO_IDLE_FUNCS))  # a controller func the no-PP box and parked list run under
+
 
 def _player(g) -> play.Player:
     p = play.Player.__new__(play.Player)
@@ -31,26 +33,33 @@ def _player(g) -> play.Player:
 
 
 class _BoxG:
-    """Selection-script box up (comm 6) for the first reads, then B dismisses it and the turn moves
-    on (in_battle goes False), so the loop exits without mashing A. choosing() stays False."""
+    """Selection-script box up (comm 6) under the idle controller. _comm_action taps B each pass;
+    once the box has cleared the controller returns to the action pick (choosing True), so the intro
+    loop returns without ever tapping A into the box."""
     def __init__(self):
         self._reads = 0
 
+    def controller_func(self, battler):
+        return IDLE
+
     def comm(self, battler=0):
         self._reads += 1
-        return 6 if self._reads <= 2 else 0
+        return 6
 
     def choosing(self, battler):
-        return False
+        return self._reads >= 2
 
     def in_battle(self):
-        return self._reads <= 2
+        return True
 
 
 class _ParkedMoveG:
     """Move list bounced to the idle controller (comm 3), cursor parked on the 0-PP slot 0."""
     def __init__(self):
         self.cursor = 0
+
+    def controller_func(self, battler):
+        return IDLE
 
     def comm(self, battler=0):
         return 3
@@ -123,7 +132,7 @@ class _ToggleG:
         return 0
 
     def controller_func(self, battler):
-        return 0
+        return IDLE
 
 
 def test_box_toggling_mid_intro_never_mashes_a_at_comm6():
@@ -147,3 +156,44 @@ def test_box_toggling_mid_intro_never_mashes_a_at_comm6():
     p._advance_intro(0, me, [])
     assert (eb.KEY_A, 6) not in p.presses, "an A at comm 6 re-dismisses the no-PP box, which reopens"
     assert (eb.KEY_B, 6) in p.presses, "the box is left with B when it toggles up mid-intro"
+
+
+class _OpenBoxG:
+    """A 0-PP lead pops the selection-script box (comm 6) while the Fight list is opening, under the
+    idle controller; the box clears to the open move list (comm 3) once B dismisses it. This is the
+    move-list open gate's path, the sibling loop _advance_intro's fix first missed."""
+    def __init__(self):
+        self.n = 0
+
+    def controller_func(self, battler):
+        return IDLE
+
+    def comm(self, battler=0):
+        return 6 if self.n == 0 else 3
+
+    def in_battle(self):
+        return True
+
+    def tick(self):
+        self.n += 1
+
+
+def test_comm_wait_leaves_opening_box_with_b_never_mashes_the_open_key():
+    g = _OpenBoxG()
+    p = play.Player.__new__(play.Player)
+    p.g = g
+    p.presses = []
+
+    def tap(keys, hold=8, gap=12):
+        p.presses.append((keys, g.comm()))
+        if keys == eb.KEY_B:
+            g.tick()  # B dismisses the box; the open move list (comm 3) sits behind it
+        if len(p.presses) > 200:
+            raise RuntimeError("comm_wait hung")
+
+    p.tap = tap
+    p.run = lambda frames, keys=0: None
+    verdict = p.comm_wait(0, lambda: g.comm() == 3, key=eb.KEY_A)
+    assert verdict in ("ready", "move_list"), "the open Fight list is reached, not a timeout"
+    assert (eb.KEY_A, 6) not in p.presses, "the open key at comm 6 re-opens the no-PP box"
+    assert (eb.KEY_B, 6) in p.presses, "the box is left with B, not the open key"

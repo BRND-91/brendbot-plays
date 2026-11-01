@@ -242,7 +242,6 @@ INTRO_IDLE_FUNCS = frozenset({0x083AA958, 0x083AA964, 0x083AA968})
 INTRO_STEP_FRAMES = 180     # frames to let one intro text box clear after an A before the next press
 INTRO_PROMOTE_FRAMES = 300  # frames to wait at the post-intro idle for the action menu to open, no press
 INTRO_PRESSES = 8           # A presses one battle_step spends advancing an intro before it yields
-SELECTION_SCRIPT_RETRIES = 8  # bounded B presses to leave the no-PP selection script box
 # one frame of hold is a press edge to the ROM's newKeys read; the release frames give the next
 # press a fresh edge. The old 8+12 spent 20 frames (333 ms at the stream's real-time clock) per key
 TAP_HOLD = 2
@@ -765,6 +764,59 @@ class Player:
                 return True
         return False
 
+    def _comm_action(self, b: int) -> str:
+        """The no-PP selection-box dispatch, single-sourced so no battle wait loop presses its own key
+        into the box. While b's controller is in the action or move choose phase, read
+        gBattleCommunication[b]: at the selection-script box (comm 6) tap B, the only key that leaves
+        it, and return "box"; at a move list bounced under the idle controller (comm 3) return
+        "move_list" so the caller steers to a PP'd slot instead of confirming the parked 0-PP one. comm
+        is read only under a choose or intro-idle controller func, where it is the live sub-state; the
+        bag and party-menu callbacks leave it holding a stale value a blind read would act on."""
+        cf = self.g.controller_func(b)
+        if cf not in S.PLAYER_CHOOSE_ACTION_FUNCS and cf not in INTRO_IDLE_FUNCS:
+            return ""
+        c = self.g.comm(b)
+        if c == S.SELECTION_SCRIPT_COMM_STATE:
+            self.tap(eb.KEY_B)
+            return "box"
+        if c == S.MOVE_LIST_COMM_STATE:
+            return "move_list"
+        return ""
+
+    def comm_wait(self, b: int, pred, timeout: int = 30, tries: int = 4,
+                  poll: int = MENU_POLL_FRAMES, key: int = 0) -> str:
+        """press_until with the no-PP box dispatch folded in: the one waiter every battle choose-phase
+        loop runs, so a selection-script box that toggles up mid-wait is left with B rather than mashed
+        back open by the loop's own key. Per try, return "gone" if the battle ended, "ready" once pred
+        holds, "move_list" if the list bounced under the idle controller (comm 3) for the caller to
+        steer and confirm. At the box (comm 6) _comm_action taps B, so that try skips `key`; otherwise
+        tap `key` once when given, then wait up to `timeout` frames, re-reading the box each poll.
+        Returns "ready"/"move_list"/"gone", or "" after `tries` presses without pred."""
+        for _ in range(tries):
+            if not self.g.in_battle():
+                return "gone"
+            if pred():
+                return "ready"
+            act = self._comm_action(b)
+            if act == "move_list":
+                return "move_list"
+            if act == "" and key:
+                self.tap(key)
+            for _ in range(0, timeout, poll):
+                self.run(poll)
+                if not self.g.in_battle():
+                    return "gone"
+                if pred():
+                    return "ready"
+                inner = self._comm_action(b)
+                if inner == "move_list":
+                    return "move_list"
+                if inner == "box":
+                    break
+        if not self.g.in_battle():
+            return "gone"
+        return "ready" if pred() else ""
+
     def _reach_fight(self, b: int) -> bool:
         """Steer the action cursor to Fight (slot 0). Returns True once it lands on Fight or the
         battle ends, False if a held prompt kept it off Fight after every retry. Each retry taps
@@ -1172,8 +1224,11 @@ class Player:
         # that separates them, so press A only from the grid; when the ROM has bounced control back
         # with the list still drawn (a refused 0-PP or Last Resort slot), skip the open and steer.
         if not self.g.in_move_list(b):
-            self.press_until(eb.KEY_A, lambda: self.g.in_move_list(b) or not self.g.in_battle(),
-                             timeout=30, tries=MOVE_OPEN_RETRIES)
+            # A opens the Fight list, but a 0-PP lead pops the selection-script box here the same as
+            # mid-intro; comm_wait leaves that box with B instead of mashing A back into it
+            if self.comm_wait(b, lambda: self.g.in_move_list(b),
+                              tries=MOVE_OPEN_RETRIES, key=eb.KEY_A) == "gone":
+                return
         if not self.g.in_battle():
             return
         self.steer_move_cursor(b, plan[1] if plan is not None else self.pick_move(me, foes))
@@ -1184,20 +1239,18 @@ class Player:
         animation, a text box, or the no-PP selection box). The grid is drawn but a decision read
         now re-issues the leaving mon, so no action key goes out until the engine opens the menu.
         Keying on b reads a double on its real chooser, battler 2 while battler 0 idles at 0x83aa958.
-        comm is re-read each pass because the no-PP box can toggle up mid-intro, not only on entry."""
+        The box dispatch runs through _comm_action each pass, since the no-PP box can toggle up
+        mid-intro, not only on entry, and that dispatch is shared with every other wait loop."""
         for _ in range(INTRO_PRESSES):
             if self.g.choosing(0) or self.g.choosing(2) or not self.g.in_battle():
                 return
-            comm = self.g.comm(b)
-            if comm == S.SELECTION_SCRIPT_COMM_STATE:
-                # the no-PP / ineffective-move box: only B leaves it, and an A re-dismisses it
-                # straight back open, the Seaking no-PP loop
-                self.press_until(eb.KEY_B,
-                                 lambda: self.g.comm(b) != S.SELECTION_SCRIPT_COMM_STATE
-                                 or not self.g.in_battle(),
-                                 timeout=30, tries=SELECTION_SCRIPT_RETRIES)
+            act = self._comm_action(b)
+            if act == "box":
+                # _comm_action tapped B to leave the no-PP box; an A would re-open it, the Seaking
+                # loop, so re-read next pass instead of advancing
+                self.run(INTRO_POLL_FRAMES)
                 continue
-            if comm == S.MOVE_LIST_COMM_STATE:
+            if act == "move_list":
                 # a move list bounced to the idle controller: steer to a PP'd slot and confirm. An A
                 # on the parked 0-PP slot re-confirms the move the ROM just refused
                 self.steer_move_cursor(b, self.pick_move(me, foes))
