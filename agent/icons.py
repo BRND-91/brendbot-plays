@@ -88,7 +88,62 @@ def badge_colour(im: Image.Image) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
+SHEET_COLS = 32               # icons per row on the sprite sheet; cell for species id is id-1
+DEX_COUNT = 1025              # national dex; the live board draws only these, so forms stay off the sheet
+
+
+def _grey(im: Image.Image) -> Image.Image:
+    """Unseen variant: flattened to a dark grey, alpha kept."""
+    r, g, b, a = im.split()
+    lum = Image.merge("RGB", (r, g, b)).convert("L").point(lambda v: int(v * 0.42))
+    return Image.merge("RGBA", (lum, lum, lum, a))
+
+
+def _dim(im: Image.Image) -> Image.Image:
+    """Seen-not-owned variant: desaturated toward grey at full brightness, alpha kept."""
+    rgb = im.convert("RGB")
+    blended = Image.blend(rgb, rgb.convert("L").convert("RGB"), 0.6)
+    out = blended.convert("RGBA")
+    out.putalpha(im.split()[3])
+    return out
+
+
+def sheets() -> dict:
+    """Three 32x32-cell sprite sheets, one per dex state (owned colour, seen dimmed, unseen
+    grey), indexed so species id n sits at cell (n-1). The page swaps state by background
+    swap, no live CSS filter. National-dex ids only; forms carry no dex bit, so the board
+    never draws them."""
+    rows = (DEX_COUNT + SHEET_COLS - 1) // SHEET_COLS
+    size = (SHEET_COLS * ICON, rows * ICON)
+    owned = Image.new("RGBA", size)
+    seen = Image.new("RGBA", size)
+    unseen = Image.new("RGBA", size)
+    n = 0
+    for sid in range(1, DEX_COUNT + 1):
+        im = icon(sid)
+        if im is None:
+            continue
+        idx = sid - 1
+        xy = ((idx % SHEET_COLS) * ICON, (idx // SHEET_COLS) * ICON)
+        owned.paste(im, xy)
+        seen.paste(_dim(im), xy)
+        unseen.paste(_grey(im), xy)
+        n += 1
+    return {"owned": owned, "seen": seen, "unseen": unseen, "count": n, "rows": rows}
+
+
 def main() -> None:
+    if "--sheets" in sys.argv:
+        out = sys.argv[1]
+        os.makedirs(out, exist_ok=True)
+        s = sheets()
+        for state in ("owned", "seen", "unseen"):
+            s[state].save(os.path.join(out, f"icons-{state}.png"), "PNG", optimize=True)
+        import json
+        with open(os.path.join(out, "icons-sheet.json"), "w") as f:
+            json.dump({"cols": SHEET_COLS, "cell": ICON, "count": DEX_COUNT}, f)
+        print(f"{s['count']} icons across 3 sheets ({SHEET_COLS}x{s['rows']} cells) in {out}")
+        return
     out = sys.argv[1]
     icons_dir, types_dir = os.path.join(out, "icons"), os.path.join(out, "types")
     os.makedirs(icons_dir, exist_ok=True)

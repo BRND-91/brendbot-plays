@@ -301,6 +301,16 @@ FLAG_RECEIVED_BADGE01 = 0xE25  # +n for the nth badge reward handed over, set be
 FLAG_BADGE01 = 0xCD7  # system flags start at 0xCD0 here (vanilla 0x860), badge 1 is +7 in both
 BADGE_COUNT = 8
 
+# Pokedex owned/seen bit arrays in SaveBlock1: adjacent dexSeen then dexCaught, each
+# DEX_FLAGS_NO bytes; bit = nationalDexNo - 1, byte index // 8, mask 1 << (index % 8)
+# (RoweSource pokedex.c GetSetPokedexFlag). Offsets fingerprinted against live
+# savestates by matching the party's owned national numbers (dexgen/probe_pokedex.py);
+# stride 188 is ROUND_BITS_TO_BYTES(POKEMON_SLOTS_NUMBER=1500). National dex caps at 1025.
+SB1_DEX_SEEN = 0x3320
+SB1_DEX_CAUGHT = 0x33DC
+DEX_FLAGS_NO = 188
+NATIONAL_DEX_MAX = 1025
+
 
 def addr(name: str) -> int:
     return (IWRAM.get(name) or EWRAM[name])[0]

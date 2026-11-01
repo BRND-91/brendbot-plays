@@ -332,6 +332,19 @@ class GameState:
         sb2 = self.e.u32(S.addr("gSaveBlock2Ptr"))
         return self.e.u32(sb1 + S.SB1_MONEY) ^ self.e.u32(sb2 + S.SB2_ENCRYPTION_KEY)
 
+    def pokedex(self) -> tuple:
+        """(owned, seen) national dex numbers read off SaveBlock1's dexCaught and dexSeen
+        bit arrays; bit n-1, national dex capped at NATIONAL_DEX_MAX. This is the in-game
+        Pokedex, not the executor's catch ledger."""
+        sb1 = self.e.u32(S.addr("gSaveBlock1Ptr"))
+        caught = self.e.read(sb1 + S.SB1_DEX_CAUGHT, S.DEX_FLAGS_NO)
+        seen = self.e.read(sb1 + S.SB1_DEX_SEEN, S.DEX_FLAGS_NO)
+
+        def ids(buf: bytes) -> list:
+            return [n for n in range(1, S.NATIONAL_DEX_MAX + 1)
+                    if buf[(n - 1) // 8] & (1 << ((n - 1) % 8))]
+        return ids(caught), ids(seen)
+
     def iv_boosts(self) -> tuple:
         """Every mon's IVs in stat order (HP, Atk, Def, Spe, SpA, SpD): the Trainer Skill stat-boost
         levels times SKILL_IV_PER_LEVEL. The skill rows run HP, Atk, Def, SpA, SpD, Spe."""
