@@ -11,8 +11,16 @@ The live grind rewrites `states/live.ss` while it runs, so the live-save sha and
 ## rowe-grind service
 
 - active (running) since 2026-11-01 16:44:32 UTC, MainPID 501777 (`run-grind.sh`), cgroup `/system.slice/rowe-grind.service`. Source: `systemctl show`/`status` this run.
-- Launched as a systemd transient unit (`systemd-run --unit=rowe-grind`), FragmentPath `/run/systemd/transient/rowe-grind.service`, ExecStart `/opt/brendbot/rowe-agent/run-grind.sh 24`.
-- Started and stopped only by Brendan.
+- Launched as a systemd transient unit (`systemd-run --unit=rowe-grind`), FragmentPath `/run/systemd/transient/rowe-grind.service`, WorkingDirectory `/opt/brendbot/rowe-agent`, ExecStart `/opt/brendbot/rowe-agent/run-grind.sh 24`.
+- Restart after a verified fix is brendbot's; a partial fix does not get a restart. Relaunch: `systemctl reset-failed rowe-grind && systemd-run --unit=rowe-grind -p WorkingDirectory=/opt/brendbot/rowe-agent /opt/brendbot/rowe-agent/run-grind.sh 24`.
+
+## Sootopolis escape, third crossing (emerge)
+
+- Emerge (0,51)->(0,41) is a yes/no dialogue, "Light is filtering down from above. Would you like to surface?". `take_dive(EMERGE)` sends B, waits for the two-line prompt, then A for YES; the old single-B press left the prompt open and read as stuck, so emerge never fired in this agent (zero `emerge: moved` across 30427 grind.log lines, the (0,7) sightings were `snapshot -> states/live.ss` relaunches).
+- `nav.Grid.emerge_tiles` picks reachable seabed minus the back-warp tile and the no-surfacing behaviours `NO_SURFACE_BEHAVIORS = {0x19, 0x2A}`. Landing (45,66) is behaviour 0x00 and surfaces to (0,41) at the same coords.
+- Gates `(0,7)->(24,5)` and `(24,5)->(0,51)` cleared from `states/map_graph.json` (backup `states/map_graph.json.pre-gateclear`), so `graph.route((0,7),(0,8))` threads the crossing. `(0,51)->(0,52)` left gated.
+- Planner at all-gyms-beaten returns `{"mode":"travel","to":[0,8]}` when a route exists, grind-hold otherwise. `planner.py` builds its `MapGraph` with `world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs()` (matching `play.py`); the earlier worldless `MapGraph(GRAPH)` made `graph.route()` traverse only walked borders, so `route((0,7),(0,8))` read None and the travel branch fell through to grind-hold even with the gates cleared. `hops_from` was unaffected since it reads `world_edges()` directly.
+- Crossing confirmed live: executor reached `map [0,41] tile [42,65]` this run, so the dive/warp/emerge legs all fired in play. With the worldless bug, the stale `travel [0,8]` goal drove the crossing; with the fix the planner re-emits travel [0,8] on the next relaunch (grind-hold `[0,39]` otherwise).
 
 ## Sootopolis gym `(15,0)`
 
@@ -27,11 +35,11 @@ The live grind rewrites `states/live.ss` while it runs, so the live-save sha and
 
 ## Repos
 
-- Live tree `/opt/brendbot/rowe-agent`. Mirror `BRND-91/brendbot-plays` `agent/` at `3c768fa`.
+- Live tree `/opt/brendbot/rowe-agent`. Mirror `BRND-91/brendbot-plays` `agent/` at `5f5cc70` (emerge crossing + planner endgame travel, pytest 107 passed).
 - Drift of `agent/` against live (excluding gitignored `gym_routes.json`), from a per-file `diff -q` this run:
   - 25 files differ: `PROGRESSION.md`, `battle_engine.py`, `catch.py`, `make_fortree_entry.py`, `rowe_rom.py`, `rowe_state.py`, `run-grind.sh`, `swaps.json`, `test_battle_engine.py`, `test_catch.py`, `test_exp_lead_switch.py`, `test_gym_maps.py`, `test_party_menu_double.py`, and the probes `probe_dive_sootopolis.py`, `probe_elevation.py`, `probe_fortree_bfs.py`, `probe_fortree_gym.py`, `probe_fortree_offline.py`, `probe_gym_exit.py`, `probe_gym_sweep.py`, `probe_lavaridge_bfs.py`, `probe_lilycove_ball.py`, `probe_sootopolis_entry.py`, `probe_surf_dismount.py`, `probe_switch_stall.py`.
   - 12 files only in live: `ENDGAME_PLAN.md`, `build_rom_db.py`, `find_best_state.py`, `mgba-stubs.so`, `probe_chosen_action.py`, `probe_double_stall.py`, `probe_ice_timing.py`, `probe_sootopolis_bfs.py`, `probe_unstick_control.py`, `rowe_live.py`, `test_grind_hold.py`, `test_rowe_live.py`.
 
 ## Tests
 
-- `pytest` from rowe-agent: 100 passed, including 27 script-style tests run by `test_script_suite.py`. Source: bare `pytest` this run.
+- `pytest` from rowe-agent: 107 passed, including the 3 `test_emerge.py` crossing tests and 27 script-style tests run by `test_script_suite.py`. Source: `.venv/bin/python -m pytest -q` this run.

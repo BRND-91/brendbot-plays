@@ -220,7 +220,7 @@ def main() -> None:
         status = json.load(f)
     age = int(time.time() - status["ts"])
     lead = status["party"][0]
-    graph = map_graph.MapGraph(GRAPH)
+    graph = map_graph.MapGraph(GRAPH, world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs())
     goal, why = recommend(status, graph)
     current = json.load(open(GOAL)) if os.path.exists(GOAL) else None
     running = executor_running()
