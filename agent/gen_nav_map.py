@@ -1,8 +1,9 @@
 """Render the ROWE map-connection graph the autoplayer routes over as a standalone HTML page.
 Nodes are maps keyed (group,num), edges are the overworld connections and warps from
-rowe_rom.world_edges(). The party's reachable set (BFS from the start map) is drawn green and the
-Sootopolis island (gym 8, unreachable in the map data) red, so the disconnection the planner cannot
-route over is visible. One self-contained file, graph data inline, vis-network from a CDN."""
+rowe_rom.world_edges(). The party's reachable set (BFS from the start map) is drawn green and any
+map with no connection, warp, or dive edge into it red. The dive-script edge into Sootopolis folds
+gym 8 and its underwater approach into the green set, so a red node now marks a true dead pocket.
+One self-contained file, graph data inline, vis-network from a CDN."""
 import collections
 import json
 import sys
@@ -34,8 +35,8 @@ def component(adj: dict, seeds: set, skip_group=None) -> set:
 def build() -> dict:
     directed = {k: set(v) for k, v in R.world_edges().items()}
     party = component(directed, {START}, skip_group=GARBAGE_GROUP)
-    # the gym-8 island, directed reach from Sootopolis City with the placeholder group dropped, which
-    # stays inside the city, its interiors, and the underwater cluster since no real edge leaves it
+    # maps reachable from Sootopolis City but not from the party start; the dive-script edge links
+    # the two, so this is empty unless a genuine dead pocket with no edge in remains
     soot = component(directed, {(0, 7)}, skip_group=GARBAGE_GROUP) - party
     gyms = set(R.gym_maps())
     shown = party | soot
@@ -91,7 +92,7 @@ def page(g: dict) -> str:
   <h1>Brendbot Plays — ROWE nav map</h1>
   <span>Every map the autoplayer routes over, as connection and warp edges.
   <span class="key" style="background:#4caf72"></span>reachable from the party ({len(party)} maps)
-  <span class="key" style="background:#e0565b"></span>Sootopolis + gym 8 island ({len(soot)} maps), no edge into it
+  <span class="key" style="background:#e0565b"></span>no edge in ({len(soot)} maps)
   <span class="key" style="background:#f2c14e"></span>gym</span>
 </div>
 <div id="net"></div>

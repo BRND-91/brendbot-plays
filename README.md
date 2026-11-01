@@ -13,20 +13,22 @@ tables, decides a goal, and drives real button presses, streaming the result.
 ## The nav map
 
 `index.html` renders the map-connection graph the autoplayer routes over. Nodes are maps
-keyed `group,num`. Edges are the overworld connections and warps read straight from the ROM.
-The layout is force-directed, so a connected mesh means the maps link and a separate cluster
-means they do not.
+keyed `group,num`. Edges are the overworld connections, warps, and dive edges read straight
+from the ROM. The layout is force-directed, so a connected mesh means the maps link and a
+separate cluster means they do not.
 
-- **Green** is the 337 maps reachable from the party's start, the set the planner can path
+- **Green** is the 375 maps reachable from the party's start, the set the planner can path
   over.
-- **Red** is Sootopolis City, its interiors, gym 8, and the underwater maps beneath it: 19
-  maps with no connection, warp, or dive edge leading into them from the reachable set.
-- **Gold star** is a gym entrance. Seven sit inside the green mesh; the eighth sits in the
-  red island.
+- **Red** is any map with no connection, warp, or dive edge into it from that set. The graph
+  currently has none.
+- **Gold star** is a gym entrance. All eight sit inside the green mesh.
 
-The red cluster floating free of the green mesh is why the autoplayer never reaches the last
-gym. The entrance is a story-flag script warp the connection, warp, and coord tables never
-expose, so no graph route into it exists to follow.
+Sootopolis and gym 8 used to float free of the mesh as a 19-map red island, because the
+entrance is not a connection or a plain warp. It is a `setdivewarp` buried in the map's
+ON_DIVE_WARP script that fires when the player surfaces in the underwater Sootopolis map.
+`world_edges()` now parses that script table and emits the dive edge, so the planner has a
+route in. A surface dive connection reaches the underwater route, a warp reaches underwater
+Sootopolis, and surfacing there runs the `setdivewarp` that lands the party in the city.
 
 ## Running it
 

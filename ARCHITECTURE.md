@@ -42,7 +42,9 @@ A single run is a supervisor around one executor process:
   symbols.
 - `rowe_rom.py` reads the static ROM tables: move table, type chart, species data, trainer
   rosters, map headers, connections, warps, metatile behaviors. Offsets were located by
-  fingerprinting known vanilla entries and hold for this ROM build only.
+  fingerprinting known vanilla entries and hold for this ROM build only. `dive_script_edges()`
+  decodes each map's dive-warp script table for the `setdivewarp` targets the connection and
+  warp tables never carry, and `is_underwater()` reads the map-type byte off the header.
 - `rowe_map.py` reads the warps and connections of the current map through the live map
   header.
 
@@ -54,10 +56,14 @@ A single run is a supervisor around one executor process:
 - `nav.py` is the overworld pathfinder. It reads the current map plus its connection margin,
   blocks collision and NPC tiles, models water and ledges and elevation, BFSes to a target,
   and walks it one tile at a time, confirming each step against the save block so an
-  interrupted walk is caught.
+  interrupted walk is caught. On an underwater map it treats the deep water as walkable floor
+  rather than surf-only water.
 - `map_graph.py` is the world graph the travel loop routes over. Edges come from the ROM's
   full connection and warp tables (every map routable before it is walked) plus the live
-  connection reads the executor records as it moves.
+  connection reads the executor records as it moves. The dive-script edges from
+  `rowe_rom.world_edges()` are part of that set, which links Sootopolis and gym 8 into the
+  routable graph. A dive connection reaches the underwater route, a warp reaches underwater
+  Sootopolis, and the `setdivewarp` fires when the player surfaces in the city.
 
 ### Battle and catching
 - `battle_engine.py` chooses moves and switches from live battler data and the ROM's move
@@ -71,9 +77,11 @@ A single run is a supervisor around one executor process:
   toward the nearest one.
 - `play.py` is the executor and the largest file: the per-frame loop, goal handling (grind,
   travel, explore), gym fights, menu handling, battle stepping, and the stall detector that
-  ends a wedged run so the supervisor can relaunch.
+  ends a wedged run so the supervisor can relaunch. Its `_cross_to` fires the emerge when the
+  next hop is a map's `setdivewarp` target, the crossing the live connection table omits.
 - `routines.py` is the multi-map errands built on nav: heal runs to a Pokémon Center,
-  Mart shopping, party refills from the PC box.
+  Mart shopping, party refills from the PC box. `take_dive` also drives a dive or an emerge,
+  surfacing by pressing B across the reachable tiles until the map changes.
 
 ### Orchestration and config
 - `run-grind.sh` is the supervisor loop described above.
