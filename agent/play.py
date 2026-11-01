@@ -1184,22 +1184,26 @@ class Player:
         animation, a text box, or the no-PP selection box). The grid is drawn but a decision read
         now re-issues the leaving mon, so no action key goes out until the engine opens the menu.
         Keying on b reads a double on its real chooser, battler 2 while battler 0 idles at 0x83aa958.
-        At the no-PP box (comm 6) only B leaves it; at a move list bounced to idle (comm 3) steer to a
-        PP'd slot and confirm, since an A there re-confirms the refused slot, the Seaking no-PP loop."""
-        comm = self.g.comm(b)
-        if comm == S.SELECTION_SCRIPT_COMM_STATE:
-            self.press_until(eb.KEY_B,
-                             lambda: self.g.comm(b) != S.SELECTION_SCRIPT_COMM_STATE
-                             or not self.g.in_battle(),
-                             timeout=30, tries=SELECTION_SCRIPT_RETRIES)
-            return
-        if comm == S.MOVE_LIST_COMM_STATE:
-            self.steer_move_cursor(b, self.pick_move(me, foes))
-            self.confirm_move(b, me)
-            return
+        comm is re-read each pass because the no-PP box can toggle up mid-intro, not only on entry."""
         for _ in range(INTRO_PRESSES):
             if self.g.choosing(0) or self.g.choosing(2) or not self.g.in_battle():
                 return
+            comm = self.g.comm(b)
+            if comm == S.SELECTION_SCRIPT_COMM_STATE:
+                # the no-PP / ineffective-move box: only B leaves it, and an A re-dismisses it
+                # straight back open, the Seaking no-PP loop
+                self.press_until(eb.KEY_B,
+                                 lambda: self.g.comm(b) != S.SELECTION_SCRIPT_COMM_STATE
+                                 or not self.g.in_battle(),
+                                 timeout=30, tries=SELECTION_SCRIPT_RETRIES)
+                continue
+            if comm == S.MOVE_LIST_COMM_STATE:
+                # a move list bounced to the idle controller: steer to a PP'd slot and confirm. An A
+                # on the parked 0-PP slot re-confirms the move the ROM just refused
+                self.steer_move_cursor(b, self.pick_move(me, foes))
+                if self.confirm_move(b, me):
+                    return
+                continue
             before = self._battle_pulse()
             self.tap(eb.KEY_A)
             for _ in range(INTRO_STEP_FRAMES // INTRO_POLL_FRAMES):
