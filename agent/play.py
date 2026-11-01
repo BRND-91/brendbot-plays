@@ -249,6 +249,8 @@ TAP_GAP = 3
 MENU_POLL_FRAMES = 2        # poll step for menu waits that gate on a RAM readback instead of a fixed run()
 INTRO_POLL_FRAMES = 5       # frames per poll while waiting on the engine; the press fires the poll after the
                             # controller moves, so a tighter poll shortens the gap without pressing early
+KEY_NAMES = {eb.KEY_A: "A", eb.KEY_B: "B", eb.KEY_UP: "UP", eb.KEY_DOWN: "DOWN", eb.KEY_LEFT: "LEFT",
+             eb.KEY_RIGHT: "RIGHT", eb.KEY_START: "START", eb.KEY_SELECT: "SELECT", 0: "-"}
 
 
 def nearer_border(maps: list, pos: tuple, size: tuple, connections: list) -> tuple:
@@ -712,8 +714,36 @@ class Player:
         core._core.setKeys(core._core, 0)
 
     def tap(self, keys: int, hold: int = TAP_HOLD, gap: int = TAP_GAP) -> None:
+        if self.g.in_battle():
+            print(self._battle_press_log(keys), flush=True)
         self.run(hold, keys)
         self.run(gap)
+
+    def _battle_press_log(self, keys: int) -> str:
+        """One line naming a battle press and the state read before it, so a wrong press is
+        findable in grind.log. Prints the key, the main callback, and for the player chooser b its
+        controller func, gBattleCommunication[b], and the cursor slot on the open screen with the
+        hp or pp under it."""
+        g = self.g
+        cb2 = g.callback2()
+        b = g.chooser()
+        func = g.controller_func(b)
+        comm = self.e.read(S.addr("gBattleCommunication") + b, 1)[0]
+        head = f"  press {KEY_NAMES.get(keys, hex(keys))} cb2 {cb2:#x} func {func:#x} comm[{b}] {comm}"
+        if cb2 in S.CB2_PARTY_MENU:
+            slot = g.party_menu_slot()
+            party = g.party()
+            if slot < len(party):
+                m = party[slot]
+                return f"{head} party slot {slot} {m.nickname} hp {m.hp}/{m.max_hp}"
+            return f"{head} party slot {slot}"
+        if g.in_move_list(b):
+            slot = g.move_cursor(b)
+            mons = g.battlers()
+            if b < len(mons) and slot < len(mons[b].pp):
+                return f"{head} move slot {slot} pp {mons[b].pp[slot]}"
+            return f"{head} move slot {slot}"
+        return f"{head} action cursor {g.action_cursor(b)}"
 
     def wait_until(self, pred, max_frames: int, poll: int = MENU_POLL_FRAMES) -> bool:
         """Run frames until pred() holds or max_frames pass; returns pred(). Replaces a fixed
@@ -814,7 +844,15 @@ class Player:
             # the presses landed on some other grid (the move list keeps the chooser flag set
             # after a dropped A), so a second A here would fire whatever the cursor sits on.
             # gBagPosition holds its last value with the bag closed, so no cursor read is safe.
-            print(f"  throw: bag never opened (cb2 {self.g.callback2():#x}), backing out", flush=True)
+            # cb2 CB2_BATTLE_MAIN (0x803c761) means the RIGHT+A never left the battle screen. Dump
+            # the state and screen like the switch-stall path, so the next occurrence is a fixture
+            # the polled rewrite fails-first on.
+            cb2 = self.g.callback2()
+            path = f"/tmp/rowe_throw_nobag_{int(time.time())}"
+            with open(path + ".ss", "wb") as f:
+                f.write(self.e.save_state())
+            self.e.save_png(path + ".png")
+            print(f"  throw: bag never opened (cb2 {cb2:#x}), backing out, state {path}.ss", flush=True)
             self.tap(eb.KEY_B)
             return
         for _ in range(6):

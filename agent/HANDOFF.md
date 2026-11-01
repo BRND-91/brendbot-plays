@@ -37,11 +37,18 @@ The live grind rewrites `states/live.ss` while it runs, so the live-save sha and
 
 ## Party menu forced replacement
 
+- Status: guarded, cause not reproduced, not fixed. The polled walk and the hp/target guard are in, but HEAD's walk already reached the live target on every swept phase, so the stated misfire is unconfirmed on the single grid (double list suspected, no fixture).
 - `party_menu_step` walks the party cursor to a live bench slot and confirms with A. `gPartyMenuSlot` is the ROM's own cursor variable and updates a few frames behind the dpad press under the cursor slide, so a fixed `run(10)` after a tap could read the slot the cursor is leaving, and an A on that read confirms whatever slot the cursor settled on. The ROM refuses a fainted selection, so the cost of a stale read is an A on a fainted slot, a "no energy left" box, a B and a wasted step, not a fainted mon actually sent out.
 - Fix per the stream directive: after each tap `wait_until(party_menu_slot() != pre_tap, 30)` (poll `MENU_POLL_FRAMES`=2 up to 30), and a pre-A guard confirms only when the fresh slot is the target and `party[slot].hp > 0`, re-walking up to `PARTY_MENU_WALK_RETRIES`=3 otherwise, then B-closing. Replaces the single `run(10)`-per-tap walk.
 - Control: HEAD's `run(10)` walk reached the live target and switched on every one of 17 entry-frame phases on `states/fixtures/party_menu_faint.ss` (faints at slots 0,1) and a far-target variant (only slot 5 live). The misfire does not reproduce on the forced-replacement single grid, the 10-iteration loop re-reads and recovers each phase. The stream misfire is the double-battle list (one column, UP/DOWN by one, overshoot onto a fielded slot), for which there is no real `.ss`; the fix hardens both paths and is the polled-wait shape the move-list open already uses.
-- Verified: `test_party_menu_faint.py` (2 tests) green on `party_menu_faint.ss`; the switch-to-a-live-mon pin is red-capable, a zero `PARTY_MENU_WALK_RETRIES` leaves the fainted lead on the field. The double fake `test_party_menu_double.py` still passes. pytest 112.
+- Verified: `test_party_menu_faint.py` (2 tests) green on `party_menu_faint.ss`; the switch-to-a-live-mon pin is red-capable, a zero `PARTY_MENU_WALK_RETRIES` leaves the fainted lead on the field. The double fake `test_party_menu_double.py` still passes. pytest 114.
 - `states/fixtures/party_menu_faint.ss`: open party grid after a wild lead fainted, cursor slot 0 (fainted), slot 1 fainted, live bench 2-5. Built from `party_menu.ss` (which sits one A earlier, at the "Use next POKéMON?" prompt before the grid).
+
+## Per-press battle log and throw_ball dump
+
+- `Player._battle_press_log` prints one grind.log line per battle press, gated in `tap` on `in_battle()`: the key, `cb2`, the chooser's controller func, `gBattleCommunication[b]`, and the cursor slot on the open screen with the hp (party menu) or pp (move list) under it. The live party-menu walk reads as `press DOWN ... party slot 0 Flechinder hp 0/61` then `press A ... party slot 2 Herdier hp 60/60`. `test_press_log.py` pins the party-menu and move-list lines.
+- `0x803c761` is `CB2_BATTLE_MAIN` (rowe_symbols:272), the callback through the action grid, move list and turn playback. `throw: bag never opened (cb2 0x803c761)` means the RIGHT+A never left the battle screen into the bag.
+- `throw_ball`'s no-bag back-out now dumps state + png to `/tmp/rowe_throw_nobag_<ts>.ss` like the switch-stall path, so the next live occurrence is a fixture to fail-first the polled rewrite on. The polled rewrite of `throw_ball` (press until `callback2 == CB2_BAG_MAIN`) is not written, it waits on that dump.
 
 ## Repos
 
@@ -52,4 +59,4 @@ The live grind rewrites `states/live.ss` while it runs, so the live-save sha and
 
 ## Tests
 
-- `pytest` from rowe-agent: 112 passed, with the 3 `test_battle_wedge_route126.py` move-list tests, the 2 `test_party_menu_faint.py` forced-replacement tests, and the 3 `test_emerge.py` crossing tests among them. Source: `.venv/bin/python -m pytest -q` this run.
+- `pytest` from rowe-agent: 114 passed, with the 3 `test_battle_wedge_route126.py` move-list tests, the 2 `test_party_menu_faint.py` forced-replacement tests, the 2 `test_press_log.py` battle-log tests, and the 3 `test_emerge.py` crossing tests among them. Source: `.venv/bin/python -m pytest -q` this run.

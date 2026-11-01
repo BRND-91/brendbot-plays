@@ -28,9 +28,19 @@ class G:
         return True
 
 
+class E:
+    """Emulator double for the back-out dump; the real routine saves state + png on no bag open."""
+    def save_state(self) -> bytes:
+        return b""
+
+    def save_png(self, path: str) -> None:
+        pass
+
+
 def player(g: G) -> Player:
     p = Player.__new__(Player)
     p.g = g
+    p.e = E()
     p.keys = []
 
     def tap(keys: int, hold: int = 8, gap: int = 12) -> None:
