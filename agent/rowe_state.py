@@ -396,6 +396,13 @@ class GameState:
         battler that is actually choosing rather than battler 0."""
         return self.controller_func(battler) in S.PLAYER_CHOOSE_ACTION_FUNCS
 
+    def in_move_list(self, battler: int) -> bool:
+        """True while the Fight move list takes input for a player battler. The action func
+        0x83c12bc drives the move list too, so choosing() reads True on both screens; the move list
+        is the sub-state gBattleCommunication[0] == MOVE_LIST_COMM_STATE (0 or 2 on the action grid)."""
+        return self.controller_func(battler) in S.PLAYER_CHOOSE_ACTION_FUNCS \
+            and self.e.read(S.addr("gBattleCommunication"), 1)[0] == S.MOVE_LIST_COMM_STATE
+
     def disabled_move(self, battler: int) -> int:
         """Move id Disable has locked out for this battler, 0 when nothing is disabled."""
         addr = S.addr("gDisableStructs") + battler * S.DISABLE_STRUCT_SIZE + S.DISABLE_DISABLED_MOVE

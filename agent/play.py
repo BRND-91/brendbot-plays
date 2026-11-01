@@ -876,10 +876,10 @@ class Player:
             self.tap(eb.KEY_B)
 
     def steer_move_cursor(self, battler: int, target: int) -> None:
-        """Land the move cursor on `target` in the Fight list. The caller only gets here once b's
-        controller has left the action-choose func, so the list is open and a steer tap cannot move
-        Fight->Pokemon on a still-live grid; each hop reads the cursor back so a tap the list eats
-        while it draws is retried instead of waited out."""
+        """Land the move cursor on `target` in the Fight list. The caller only gets here once
+        in_move_list(b) holds, so the list is open and a steer tap cannot move Fight->Pokemon on a
+        still-live grid; each hop reads the cursor back so a tap the list eats while it draws is
+        retried instead of waited out."""
         for _ in range(MOVE_STEER_RETRIES):
             cur = self.g.move_cursor(battler)
             if cur == target:
@@ -1133,16 +1133,15 @@ class Player:
                 return
             print(f"  switch budget spent on {me.nickname}, fighting instead", flush=True)
             plan = None
-        # A on Fight moves b's controller off the action-choose func into the move list; gate the
-        # steer on that instead of run(40) + a DOWN/UP probe. A press eaten while "What will X do?"
-        # draws leaves b choosing, so the A repeats; the cursor is already on Fight (_reach_fight).
-        # When A never flips the func, the move list is already live under the move-select func
-        # 0x83C12BC, which choosing() cannot tell from the action grid: the ROM bounces control back
-        # here after refusing the move under the cursor (a 0-PP slot or an unusable Last Resort) with
-        # the move window still drawn, so the repeat A lands on that refused slot and the turn stalls.
-        # Steer the live cursor and confirm either way; confirm_move backs out of a spent slot itself.
-        self.press_until(eb.KEY_A, lambda: not self.g.choosing(b) or not self.g.in_battle(),
-                         timeout=30, tries=MOVE_OPEN_RETRIES)
+        # A on Fight opens the move list. The action func 0x83c12bc drives both the action grid and
+        # the move list, so choosing(b) reads True on each and cannot gate the Fight-open: pressing A
+        # once the list is already up confirms whatever slot the cursor is parked on before steer
+        # runs, firing a wrong-but-PP'd move. in_move_list reads the gBattleCommunication[0] sub-state
+        # that separates them, so press A only from the grid; when the ROM has bounced control back
+        # with the list still drawn (a refused 0-PP or Last Resort slot), skip the open and steer.
+        if not self.g.in_move_list(b):
+            self.press_until(eb.KEY_A, lambda: self.g.in_move_list(b) or not self.g.in_battle(),
+                             timeout=30, tries=MOVE_OPEN_RETRIES)
         if not self.g.in_battle():
             return
         self.steer_move_cursor(b, plan[1] if plan is not None else self.pick_move(me, foes))

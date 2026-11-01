@@ -283,6 +283,10 @@ PLAYER_CHOOSE_ACTION = 0x083C12BC
 # the roxanne and battle_disabled fixtures, which hold 0x83C12BC
 PLAYER_CHOOSE_ACTION_ALT = 0x084F5D40
 PLAYER_CHOOSE_ACTION_FUNCS = frozenset({PLAYER_CHOOSE_ACTION, PLAYER_CHOOSE_ACTION_ALT})
+# gBattleCommunication[0] sub-state while PLAYER_CHOOSE_ACTION drives input. The same func runs the
+# action grid and the Fight move list, so this is the only read that tells them apart: 0 or 2 on the
+# grid, 3 while the move list takes input (diffed across roxanne, battle_disabled, stall_route126)
+MOVE_LIST_COMM_STATE = 3
 FIELD_LOCKED = 0x03004C94      # 1 while an NPC script holds the player (its text box up), 0 on the free field;
                                # gMain.callback2 reads overworld either way, so this tells the two apart
 # shop.c sMartInfo: the open Mart's item list, a ROM pointer to a 0-terminated u16 id array, and

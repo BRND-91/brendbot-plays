@@ -30,10 +30,10 @@ The live grind rewrites `states/live.ss` while it runs, so the live-save sha and
 
 ## Battle move-list wedge (fixed)
 
-- A wild single (`battle_type_flags 0xc`) left battler 0 on the move-select func `0x83C12BC`, which is in `PLAYER_CHOOSE_ACTION_FUNCS`, so `Grid.choosing(0)` read True with the move list already drawn. `battle_step`'s Fight-open gate pressed A until `choosing(0)` flipped, which never happens on a live move list, so the A landed on the drawn cursor (slot 0, Last Resort, 0 PP) the ROM refuses and the turn never advanced until the 12-step `WEDGE ... ctrl 0x83c12bc` dump. Hit Route 126 `(0,41)` after the crossing opened that water to the grind.
-- Fix: `battle_step` now steers the live move cursor to the picked slot and calls `confirm_move` whether or not the Fight-open A flipped `choosing`, since `confirm_move` already backs out of a spent slot with B. Verified: `test_battle_wedge_route126.py` red on the old gate and green on the fix, a full wild battle on `/tmp/live_route126.ss` won in 5 steps with no wedge, pytest 108 passed.
-- The `(15,1)` double (`battle_type_flags 0x800d`) freeze is a different controller state (ctrl `0x83aa958` idle or `0x93898e4`, not `0x83C12BC`) and stays open. Dumps at `states/fixtures/stall_<ts>.ss`, `/tmp/live_route126.ss` is the pre-battle `(0,41)` save.
-- Still open: the catch readback is one battle stale on entry. A Gyarados fight logs `catch: ... soften Luvdisc` (the prior foe) and switches a softener in; the battle still wins, so it is a spurious switch, not a freeze.
+- The action func `0x83C12BC` drives both the "What will X do?" grid and the Fight move list, branching on `gBattleCommunication[0]` (0 or 2 on the grid, 3 in the list), so `choosing(b)` reads True on both screens and cannot gate the Fight-open press. The old gate pressed A until `choosing(b)` flipped, which never happens on a live list, so the A confirmed whatever slot the cursor was parked on before `steer_move_cursor` ran: a 0-PP Last Resort slot the ROM refuses (the `WEDGE ... ctrl 0x83c12bc` dump on Route 126 `[0,41]`), or a PP'd slot that fired a move `pick_move` never chose.
+- Fix: `GameState.in_move_list(b)` reads the `comm[0] == MOVE_LIST_COMM_STATE` sub-state behind the shared func, and `battle_step` presses A to open Fight only `if not in_move_list(b)`; once the list is drawn it steers to the picked slot and confirms. `PLAYER_CHOOSE_ACTION_FUNCS` keeps `0x83C12BC` because the same func is the action handler, so removing it would break `choosing`/`chooser`. Control: diffed the action grid against the move list at the same func across `roxanne`, `battle_disabled`, `stall_route126`; the move cursor moved and `comm[0]` read 3 only on the list.
+- Verified: `test_battle_wedge_route126.py` (3 tests) green, the parked-PP misfire reproduced on `states/fixtures/movelist_parked_pp.ss` (the old gate fires the parked slot move 514, the fix fires the pick move 36), pytest 110 passed.
+- Still open: a wild single can freeze on the idle controller `0x83aa958` (`choosing` and `in_move_list` both False) out of the catch/softener-switch path, dump at `states/fixtures/stall_idle_route126_1793566797.ss`. The `(15,1)` double (`battle_type_flags 0x800d`) freeze (`0x83aa958`/`0x93898e4`) and the one-battle-stale catch readback (`soften Luvdisc` on the wrong foe, a spurious switch that still wins) remain. `/tmp/live_route126.ss` is the pre-battle `(0,41)` save.
 
 ## Repos
 
@@ -44,4 +44,4 @@ The live grind rewrites `states/live.ss` while it runs, so the live-save sha and
 
 ## Tests
 
-- `pytest` from rowe-agent: 108 passed, with the new `test_battle_wedge_route126.py` and the 3 `test_emerge.py` crossing tests among them. Source: `.venv/bin/python -m pytest -q` this run.
+- `pytest` from rowe-agent: 110 passed, with the 3 `test_battle_wedge_route126.py` move-list tests and the 3 `test_emerge.py` crossing tests among them. Source: `.venv/bin/python -m pytest -q` this run.
