@@ -14,10 +14,16 @@ Wild header layout is the RoweSource struct WildPokemonHeader: a u8 group, u8 nu
 then seven WildPokemonInfo pointers in order land, land-night, water, rock-smash,
 fishing, hidden, headbutt, with 12/12/5/5/10/3/3 slots. The fishing block splits
 into old (0-1), good (2-4) and super (5-9) rod by RoweSource ChooseWildMonIndex_Fishing.
+
+The gate on each encounter row classifies the evolution path from the slot species up to the record
+by RoweSource GetWildPokemon()'s method groups (src/level_scaling.c). Its friendship (level 24) and
+badge (5 midgame, 7 lategame) thresholds are read from the 1.9.4 source and are approximate against
+the 2.1b binary; a multi-step level path reports the first step, the level the slot leaves its base.
 """
 import hashlib
 import json
 import os
+import shutil
 import struct
 import sys
 
@@ -29,7 +35,10 @@ NAME_OFFSET = 0x40B558
 NAME_STRIDE = 13
 DEX_MAX = 1025          # ids 1..DEX_MAX are national dex base species
 FORM_START = 1501       # ids FORM_START..SPECIES_COUNT-1 are ROWE's forms
-MAPS_JSON = "/var/www/brenergy/live/maps.json"
+LIVE_DIR = "/var/www/brenergy/live"
+MAPS_JSON = os.path.join(LIVE_DIR, "maps.json")
+ICONS_SHEET = os.path.join(LIVE_DIR, "icons-sheet.json")
+LIVE_PATH = os.path.join(LIVE_DIR, "species.json")
 OUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "species.json")
 
 # struct WildPokemonHeader pointer order and slot counts (RoweSource include/wild_encounter.h)
@@ -138,6 +147,74 @@ def evo_closure(species_id):
     return seen
 
 
+# gEvolutionTable method ids (RoweSource include/constants/pokemon.h) grouped the way
+# GetWildPokemon() gates a slot's climb (src/level_scaling.c): friendship-family levels at 24,
+# midgame at 5 badges, lategame at 7, level-family at the row's own param.
+EVO_LEVEL_METHODS = {4, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 28, 30, 35, 36, 37, 40, 41, 42}
+EVO_FRIENDSHIP_METHODS = {1, 2, 3, 21}
+EVO_MIDGAME_METHODS = {15, 22, 29}
+EVO_LATEGAME_METHODS = {5, 6, 7, 23, 25, 26, 27}
+FRIENDSHIP_LEVEL = 24
+BADGES_MIDGAME = 5
+BADGES_LATEGAME = 7
+
+
+def evo_path(src, dst):
+    """The (method, param) steps from src to dst, or None when dst is unreachable; [] when equal.
+    Lines are short and acyclic, so a per-branch visited set is enough to guard a shared target."""
+    if src == dst:
+        return []
+
+    def walk(node, path, seen):
+        for method, param, target in R.evolutions(node):
+            if not target or target >= R.SPECIES_COUNT or target in seen:
+                continue
+            step = path + [(method, param)]
+            if target == dst:
+                return step
+            found = walk(target, step, seen | {target})
+            if found is not None:
+                return found
+        return None
+
+    return walk(src, [], {src})
+
+
+def classify_gate(steps):
+    """The gate the page renders for an evolution path: None for a direct slot, {badges} when any
+    step is badge-gated (the strictest count), {level} for a level/friendship climb (the first
+    step, the level the slot leaves its base form), {kind: 'other'} when no step carries a number."""
+    if not steps:
+        return None
+    badges, levels = [], []
+    for method, param in steps:
+        if method in EVO_MIDGAME_METHODS:
+            badges.append(BADGES_MIDGAME)
+        elif method in EVO_LATEGAME_METHODS:
+            badges.append(BADGES_LATEGAME)
+        elif method in EVO_FRIENDSHIP_METHODS:
+            levels.append(FRIENDSHIP_LEVEL)
+        elif method in EVO_LEVEL_METHODS and param:
+            levels.append(param)
+    if badges:
+        return {"badges": max(badges)}
+    if levels:
+        return {"level": levels[0]}
+    return {"kind": "other"}
+
+
+def gate_cost(gate):
+    """Order gates easiest-first so a merge over several slots keeps the most direct way the record
+    appears: a direct slot, then the lowest level, then badges, then an unnumbered route."""
+    if gate is None:
+        return -1
+    if "level" in gate:
+        return gate["level"]
+    if "badges" in gate:
+        return 100 + gate["badges"]
+    return 10000
+
+
 def main():
     rom_sha = hashlib.sha256(R._rom()).hexdigest()
     with open(MAPS_JSON) as f:
@@ -153,7 +230,8 @@ def main():
             return sp
         return form_base.get(sp)
 
-    # accumulate encounters: {base_id: {(map_name, method): [min_lo, max_hi]}}
+    # accumulate encounters: {base_id: {(map_name, method): row}}, row holding the merged level
+    # span plus the slot species (via) and its evolution gate to this record
     enc = {}
     unresolved_wild = set()
     for (g, num), methods in map_encounters().items():
@@ -165,35 +243,60 @@ def main():
                     if b is None:
                         unresolved_wild.add(d)
                         continue
+                    steps = evo_path(sp, d) or []
+                    gate = classify_gate(steps)
+                    via = base_of(sp) or sp
                     key = (map_name, method)
                     cur = enc.setdefault(b, {}).get(key)
                     if cur is None:
-                        enc[b][key] = [lo, hi]
+                        enc[b][key] = {"lo": lo, "hi": hi, "via": via, "gate": gate, "plen": len(steps)}
                     else:
-                        cur[0], cur[1] = min(cur[0], lo), max(cur[1], hi)
+                        cur["lo"], cur["hi"] = min(cur["lo"], lo), max(cur["hi"], hi)
+                        if (len(steps), gate_cost(gate)) < (cur["plen"], gate_cost(cur["gate"])):
+                            cur.update(via=via, gate=gate, plen=len(steps))
 
     records = []
+    gate_hist = {"direct": 0, "level": 0, "badges": 0, "other": 0}
     for i in range(1, DEX_MAX + 1):
-        rows = [{"map": m, "method": meth, "levels": [lv[0], lv[1]]}
-                for (m, meth), lv in sorted(enc.get(i, {}).items())]
+        rows = []
+        for (m, meth), e in sorted(enc.get(i, {}).items()):
+            rows.append({"map": m, "method": meth, "levels": [e["lo"], e["hi"]],
+                         "via": e["via"], "gate": e["gate"]})
+            key = "direct" if e["gate"] is None else next(iter(e["gate"])) if "kind" not in e["gate"] else "other"
+            gate_hist[key] += 1
+        sp = R.species(i)
+        t0, t1 = sp.types
+        types = [R.TYPE_NAMES[t0]] + ([R.TYPE_NAMES[t1]] if t1 != t0 else [])
+        bs = sp.base_stats
+        stats = {"hp": bs[R.HP], "atk": bs[R.ATK], "def": bs[R.DEF],
+                 "spa": bs[R.SPA], "spd": bs[R.SPD], "spe": bs[R.SPE]}
         records.append({
             "id": i,
             "name": species_name(i),
             "forms": [{"id": f, "name": species_name(f)} for f in sorted(forms_of.get(i, []))],
             "encounters": rows,
             "no_wild": not rows,
+            "types": types,
+            "stats": stats,
         })
 
+    with open(ICONS_SHEET) as f:
+        sheet_count = json.load(f)["count"]
+    assert len(records) == DEX_MAX, f"expected {DEX_MAX} records, got {len(records)}"
+    assert len(records) == sheet_count, f"record count {len(records)} != icons-sheet count {sheet_count}"
+
     with open(OUT_PATH, "w") as f:
-        json.dump({"rom_sha": rom_sha, "species": records}, f, indent=1)
+        json.dump({"rom_sha": rom_sha, "species": records}, f, separators=(",", ":"))
+    shutil.copy(OUT_PATH, LIVE_PATH)
 
     base_count = len(records)
     form_count = sum(len(r["forms"]) for r in records)
     with_enc = sum(1 for r in records if not r["no_wild"])
-    print(f"wrote {OUT_PATH}")
+    print(f"wrote {OUT_PATH} and {LIVE_PATH}")
     print(f"rom_sha {rom_sha}")
     print(f"base records {base_count}, form records {form_count}")
     print(f"with encounters {with_enc}, no_wild {base_count - with_enc}")
+    print("gate histogram: " + ", ".join(f"{k} {gate_hist[k]}" for k in ("direct", "level", "badges", "other")))
     print(f"unresolved form names {len(unresolved_forms)}: {unresolved_forms}")
     print(f"unresolved wild species {sorted(unresolved_wild)}")
 
