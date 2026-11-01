@@ -1135,10 +1135,14 @@ class Player:
             plan = None
         # A on Fight moves b's controller off the action-choose func into the move list; gate the
         # steer on that instead of run(40) + a DOWN/UP probe. A press eaten while "What will X do?"
-        # draws leaves b choosing, so the A repeats; the cursor is already on Fight (_reach_fight)
-        if not self.press_until(eb.KEY_A, lambda: not self.g.choosing(b) or not self.g.in_battle(),
-                                timeout=30, tries=MOVE_OPEN_RETRIES):
-            return
+        # draws leaves b choosing, so the A repeats; the cursor is already on Fight (_reach_fight).
+        # When A never flips the func, the move list is already live under the move-select func
+        # 0x83C12BC, which choosing() cannot tell from the action grid: the ROM bounces control back
+        # here after refusing the move under the cursor (a 0-PP slot or an unusable Last Resort) with
+        # the move window still drawn, so the repeat A lands on that refused slot and the turn stalls.
+        # Steer the live cursor and confirm either way; confirm_move backs out of a spent slot itself.
+        self.press_until(eb.KEY_A, lambda: not self.g.choosing(b) or not self.g.in_battle(),
+                         timeout=30, tries=MOVE_OPEN_RETRIES)
         if not self.g.in_battle():
             return
         self.steer_move_cursor(b, plan[1] if plan is not None else self.pick_move(me, foes))

@@ -28,10 +28,12 @@ The live grind rewrites `states/live.ss` while it runs, so the live-save sha and
 - Fall hook in `play.py` (`ICE_FALL_FLOOR = {(15,0): (15,1)}`, `ICE_DOOR_TILE = {(15,0): (8,25)}`, `gym_step` at the `ICE_FALL_FLOOR.get(gym)` branch): a second step on cracked ice drops the party to `(15,1)`; the hook climbs the ladder at `(11,22)` via `take_warp((15,0))` and redoes the route from the door `(8,25)`.
 - Juan is a single battle, `battle_type_flags 0xc`, double bit clear.
 
-## Open bug
+## Battle move-list wedge (fixed)
 
-- The lower-floor double battle (`battle_type_flags 0x800d`), met at `(9,8)`/`(8,13)` on map `(15,1)`, freezes on a foe move message ("Foe Bibarel used Quick Attack!"). `chosen` stays `[0, 0, 0, 0]` and no action menu is drawn. Off the gym route, so Juan is reachable without it.
-- Suspects: the ROWE battle script, or `mgba-stubs.c`.
+- A wild single (`battle_type_flags 0xc`) left battler 0 on the move-select func `0x83C12BC`, which is in `PLAYER_CHOOSE_ACTION_FUNCS`, so `Grid.choosing(0)` read True with the move list already drawn. `battle_step`'s Fight-open gate pressed A until `choosing(0)` flipped, which never happens on a live move list, so the A landed on the drawn cursor (slot 0, Last Resort, 0 PP) the ROM refuses and the turn never advanced until the 12-step `WEDGE ... ctrl 0x83c12bc` dump. Hit Route 126 `(0,41)` after the crossing opened that water to the grind.
+- Fix: `battle_step` now steers the live move cursor to the picked slot and calls `confirm_move` whether or not the Fight-open A flipped `choosing`, since `confirm_move` already backs out of a spent slot with B. Verified: `test_battle_wedge_route126.py` red on the old gate and green on the fix, a full wild battle on `/tmp/live_route126.ss` won in 5 steps with no wedge, pytest 108 passed.
+- The `(15,1)` double (`battle_type_flags 0x800d`) freeze is a different controller state (ctrl `0x83aa958` idle or `0x93898e4`, not `0x83C12BC`) and stays open. Dumps at `states/fixtures/stall_<ts>.ss`, `/tmp/live_route126.ss` is the pre-battle `(0,41)` save.
+- Still open: the catch readback is one battle stale on entry. A Gyarados fight logs `catch: ... soften Luvdisc` (the prior foe) and switches a softener in; the battle still wins, so it is a spurious switch, not a freeze.
 
 ## Repos
 
@@ -42,4 +44,4 @@ The live grind rewrites `states/live.ss` while it runs, so the live-save sha and
 
 ## Tests
 
-- `pytest` from rowe-agent: 107 passed, including the 3 `test_emerge.py` crossing tests and 27 script-style tests run by `test_script_suite.py`. Source: `.venv/bin/python -m pytest -q` this run.
+- `pytest` from rowe-agent: 108 passed, with the new `test_battle_wedge_route126.py` and the 3 `test_emerge.py` crossing tests among them. Source: `.venv/bin/python -m pytest -q` this run.
