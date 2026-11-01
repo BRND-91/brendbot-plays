@@ -1902,11 +1902,13 @@ class Player:
             # the walk itself bringing the player back is the record _blocked_from retires the
             # hop on; an errand's return leaves it False so a route map left for a heal stays open
             self._returned = back
+            exits = self._landing_exits()
+            print(f"land: {list(self.g.position()[2:])} exits {sorted(list(e) for e in exits)} back={back}", flush=True)
             # a landing area w/ no way on except back across this border is a dead end for the
             # area it was entered from, whatever the rest of the map connects to: Route 104's
             # north half enters Petalburg on a pond-locked corner that reaches no door and no
             # other edge, so the walk bounced between the two maps until the budget ran out
-            if self._landing_exits() == {region[:2]}:
+            if exits == {region[:2]}:
                 self._blocked.setdefault(region, set()).add(hop)
                 print(f"dead end: {list(hop)} entered from {list(region[:2])} reaches nothing else, blocked", flush=True)
             # a loop longer than the 2-map bounce above: Slateport -> water -> back, three maps the
@@ -2018,6 +2020,7 @@ class Player:
                 self.record_closed_gym(dest, "travel_stuck")
             raise GoalExit(f"travel stuck: no route from {list(here)} to {list(dest)}, re-planning")
         nxt = self.graph.route(hop, dest, field_moves=moves) if hop != dest else None
+        print(f"hop: {list(here)} region {list(region[2:])} -> dest {list(dest)}: route {list(hop)} onward {nxt and list(nxt)}, blocked {sorted(list(b) for b in blocked)}", flush=True)
         self._after_cross(region, hop, self._cross_to(here, hop, nxt))
 
     def explore_step(self) -> None:
