@@ -1,6 +1,6 @@
 """ROWE play loop on the stream.
 
-    play.py --state states/route101.ss [--minutes 120]
+    play.py --state states/live.ss [--minutes 120]
 
 Goals come from states/goal.json: grind a map to a level cap, travel to a map,
 or explore outward to uncover new ones. Travel and explore route over the ROM's
@@ -26,6 +26,7 @@ from battle_engine import as_battler, best_switch, edge, first_usable_slot, outm
 import catch  # noqa: E402
 import map_graph  # noqa: E402
 import planner  # noqa: E402
+import rowe_live  # noqa: E402
 import rowe_map  # noqa: E402
 import rowe_symbols as S  # noqa: E402
 from nav import Grid, Navigator  # noqa: E402
@@ -70,6 +71,7 @@ SERVICE = service_towns()
 SERVICE_MAPS = {town: frozenset({town, *rooms}) for town, rooms in SERVICE.items()}
 TALL_GRASS_ID = 13  # every wild battle on Route 101 started on a 0x600D cell
 GRASS_WAIT_TICKS = 20  # 60-frame waits w/ no reachable grass before the grind map is given up
+GRASS_IDLE_CAP = 600  # seconds idling w/ no grass reachable anywhere before exiting no_grass_idle
 # recorded press routes through gym puzzles the grid cannot see (Fortree's rotating gates),
 # keyed "group,num", written by probe_fortree_bfs.py and replayed by Errands.follow_route
 GYM_ROUTES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gym_routes.json")
@@ -88,11 +90,12 @@ _GYM_MAP_SETS: dict = {}
 
 
 def gym_map_set(gym: tuple, cap: int = 6) -> frozenset:
-    """The gym's interior maps: the entry map plus every map reachable from it through warps that
-    carries no overworld connection of its own, so a leader on a lower floor (Lavaridge's B1F
-    behind the 1F fall holes) counts as inside the gym. The entry's exit warp leads to the town,
-    which has connections and stays out; cap bounds a warp chain that would otherwise pull a whole
-    dungeon in."""
+    """The gym's interior maps: the entry map plus every indoor map reached from it through warps,
+    so a leader on a lower floor (Lavaridge's B1F behind the 1F fall holes) counts as inside the
+    gym. The entry's exit warp leads to the town, which stays out. Testing the INDOOR map type and
+    not a connection count keeps a dive-only city like Sootopolis (0, 7), which carries no
+    connections of its own, out too; cap bounds a warp chain that would otherwise pull a dungeon
+    in."""
     hit = _GYM_MAP_SETS.get(gym)
     if hit is not None:
         return hit
@@ -105,7 +108,7 @@ def gym_map_set(gym: tuple, cap: int = 6) -> frozenset:
             if dest in seen:
                 continue
             seen.add(dest)
-            if not rowe_rom.map_connections(*dest):
+            if rowe_rom.is_indoor(*dest):
                 interior.add(dest)
                 frontier.append(dest)
     result = frozenset(interior)
@@ -114,6 +117,8 @@ def gym_map_set(gym: tuple, cap: int = 6) -> frozenset:
 
 
 ROUTE_RESETS = 3  # door re-entries per gym visit before an off-route run falls back to the sweep
+ICE_FALL_FLOOR = {(15, 0): (15, 1)}  # Sootopolis: a second step on a cracked ice tile drops the party here
+ICE_DOOR_TILE = {(15, 0): (8, 25)}   # the gym door, where the cover route starts on fresh ice
 HEAL_HP_PERCENT = 30
 POTION_HP_PERCENT = 30  # lead HP under this fraction uses a bag heal before the wild flee
 GYM_READY_HP_PERCENT = 70  # a gym approach tops off at a Center below this lead HP or under two PP attackers
@@ -650,12 +655,14 @@ class Player:
         self.keep_state = False  # exit w/o rewriting the state file, so the next run resumes the last snapshot
         self.end_taps = 0
         self.state_path = ""
+        self._live_writer = False  # only the live run (main) may write the live save and its ring
         self.goal = dict(DEFAULT_GOAL)
         self.events = collections.deque(maxlen=20)
         self.event_seq = 0  # lines ever said; the live page prepends the delta since its last row
         self._party_full = None  # personalities last written to party_full.json
         self.exit_reason = ""
         self.grass_waits = 0  # consecutive grind ticks w/ no reachable grass
+        self.grass_idle_since = None  # monotonic time the no-grass-anywhere idle began, for the cap
         self.last_snapshot = time.monotonic()
         self.last_status = time.monotonic()
         self._status_sig: tuple | None = None  # party fields status.json last carried
@@ -1444,7 +1451,7 @@ class Player:
         halt case), or a burst of REPLAN_BURST exits inside REPLAN_WINDOW_S, which is the tight
         loop a relaunch's reload and five-second pause used to pace."""
         status = self.write_status()
-        if self.exit_reason.startswith("unsupported"):
+        if self.exit_reason.startswith("unsupported") or self.exit_reason == "no_grass_idle":
             return False
         now = time.monotonic()
         self._replans = [t for t in self._replans if now - t < REPLAN_WINDOW_S] + [now]
@@ -1471,12 +1478,18 @@ class Player:
         return True
 
     def snapshot(self, path: str) -> None:
-        """Atomic save-state write; called only at moments the game just proved responsive."""
+        """Atomic save-state write; called only at moments the game just proved responsive. The
+        live run also keeps a timestamped copy in the backup ring so a bad overwrite is recoverable;
+        a non-live writer aimed at the live save raises instead of clobbering it."""
+        rowe_live.guard_write(path, self._live_writer)
+        blob = self.e.save_state()
         tmp = path + ".tmp"
         with open(tmp, "wb") as f:
-            f.write(self.e.save_state())
+            f.write(blob)
         os.replace(tmp, path)
         self.last_snapshot = time.monotonic()
+        if self._live_writer and rowe_live.is_live_target(path):
+            rowe_live.archive(blob)
 
     def lowest_lead(self) -> int | None:
         """Slot of the lowest-level conscious mon when the lead outlevels it by LEAD_GAP, else None."""
@@ -2123,6 +2136,31 @@ class Player:
             os.replace(path + ".tmp", path)
         self.say(f"explore frontier gated at {list(here)}, grinding toward {list(target)}")
 
+    def _grind_no_grass(self, here: tuple, x: int, y: int) -> None:
+        """No grass reachable from the grind tile. A grid read mid-transition (menu closing, map
+        reloading after a battle) shows nothing reachable for one step and settles on the next, so
+        wait it out. A wait that outlasts every transient is a standing gap to the grass (Route 104
+        north's flower-shop gate), and exiting names the map so the planner grinds elsewhere, unless
+        every reachable map is grassless too (the Sootopolis gym floor held behind the thin-ice
+        gate): there exiting re-plans straight back into the identical stall and churns the
+        supervisor every GRASS_WAIT_TICKS, so the run holds the frame and keeps the stream up until a
+        field route opens a grass map or GRASS_IDLE_CAP passes, when it exits no_grass_idle so the
+        supervisor can stop a map that never opens."""
+        self.grass_waits += 1
+        if self.grass_waits >= GRASS_WAIT_TICKS:
+            if self._reachable_grass_map(here) is None:
+                self.grass_waits = 0
+                if self.grass_idle_since is None:
+                    self.grass_idle_since = time.monotonic()
+                elif time.monotonic() - self.grass_idle_since >= GRASS_IDLE_CAP:
+                    raise GoalExit("no_grass_idle")
+                print(f"grind held: no reachable grass anywhere from {list(here)}, idling", flush=True)
+                self.run(60)
+                return
+            raise GoalExit(f"grind blocked: no reachable grass on {list(here)} from {(x, y)}")
+        print(f"grind: no reachable grass on {list(here)} from {(x, y)}, waiting", flush=True)
+        self.run(60)
+
     def collectable_balls(self) -> list:
         """Uncollected item balls on this map the grid can reach a side of, nearest first,
         skipping any whose pickup already failed this run and any with no collected flag."""
@@ -2261,18 +2299,10 @@ class Player:
         reach = grid.reachable((x, y), surf)
         grass = [t for t in grid.tiles_with_id(TALL_GRASS_ID) if t in reach]
         if not grass:
-            # a grid read mid-transition (menu closing, map reloading after a battle) can
-            # show nothing reachable for one step; the next read settles, so wait it out.
-            # A wait that outlasts every transient is a standing NPC in the only gap to the
-            # grass (Route 104 north's flower-shop gate), spawned only once the camera was
-            # near, so the planner gets the map named and grinds elsewhere
-            self.grass_waits += 1
-            if self.grass_waits >= GRASS_WAIT_TICKS:
-                raise GoalExit(f"grind blocked: no reachable grass on {list(here)} from {(x, y)}")
-            print(f"grind: no reachable grass on {list(here)} from {(x, y)}, waiting", flush=True)
-            self.run(60)
+            self._grind_no_grass(here, x, y)
             return
         self.grass_waits = 0
+        self.grass_idle_since = None
         goal = self.rng.choice(grass)
         r = self.nav.walk_to(goal, surf)
         if r not in ("arrived", "battle"):
@@ -2292,6 +2322,17 @@ class Player:
             return
         done = self._gym_done.setdefault(gym, set())
         if here != gym:
+            drop = ICE_FALL_FLOOR.get(gym)
+            if drop is not None and here == drop:
+                # a second step on a cracked ice tile dropped the party to the lower floor; take the
+                # ladder back up and walk to the door so follow_route re-runs the cover on fresh ice
+                r = self.errands.take_warp(gym)
+                print(f"gym: ice fall {here} climb -> {r} at {self.g.position()}", flush=True)
+                if r == "battle":
+                    return
+                if self.g.position()[2:] == gym:
+                    self.nav.walk_to(ICE_DOOR_TILE[gym])
+                return
             # on an interior floor below the leader's (Lavaridge's B1F, [4, 2]): no leader object
             # on this map. A recorded maze route resumes here by (floor, tile) and climbs the holes
             # back to the leader's floor; failing that the sweep takes the stairs and holes blindly,
@@ -2567,7 +2608,7 @@ def drive(player: Player, seconds: float) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--state", required=True)
+    ap.add_argument("--state", default=rowe_live.LIVE_SAVE)
     ap.add_argument("--minutes", type=float, default=120)
     ap.add_argument("--no-stream", action="store_true")
     a = ap.parse_args()
@@ -2578,6 +2619,7 @@ def main() -> None:
     streamer = NullStreamer() if a.no_stream else FrameStreamer(emu.core)
     player = Player(emu, streamer, ledger_path=a.state + ".caught.json")
     player.state_path = a.state
+    player._live_writer = rowe_live.is_live_target(a.state)
     try:
         drive(player, a.minutes * 60)
     except StopRequested:
