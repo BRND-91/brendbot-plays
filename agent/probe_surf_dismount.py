@@ -21,8 +21,8 @@ import rowe_rom
 import nav
 import play
 
-LIVE = "states"
-SCRATCH = "states/probe"
+LIVE = "states/fixtures"
+SCRATCH = "/tmp/rowe_probe"
 GYM = {"mode": "gym", "map": [11, 3], "badges": 0}
 BUDGET_S = 1500
 

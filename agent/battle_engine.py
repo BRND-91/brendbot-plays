@@ -107,7 +107,7 @@ def as_battler(mon) -> BattleMon:
     return BattleMon(
         battler=-1, species=mon.species, level=mon.level, hp=mon.hp, max_hp=mon.max_hp,
         moves=mon.moves, pp=mon.pp, types=R.species(mon.species).types, ability=0,
-        status1=mon.status, stat_stages=(6,) * 8, nickname=mon.nickname,
+        status1=mon.status, stat_stages=(6,) * 8, nickname=mon.nickname, personality=mon.personality,
         atk=mon.atk, dfn=mon.dfn, spd=mon.spd, sp_atk=mon.sp_atk, sp_def=mon.sp_def,
     )
 
@@ -128,7 +128,7 @@ def edge(user: BattleMon, foes: list) -> tuple:
 def strongest_bench(party: list, active: BattleMon, foes: list) -> tuple[int, float] | None:
     """(slot, dealt-minus-taken edge) of the bench mon best placed against foes, or None when no
     bench mon stands with a damaging move left."""
-    bench = [m for m in party if m.hp > 0 and m.nickname != active.nickname
+    bench = [m for m in party if m.hp > 0 and m.personality != active.personality
              and any(pp and R.move(mid).power >= 10 for mid, pp in zip(m.moves, m.pp))]
     if not bench:
         return None

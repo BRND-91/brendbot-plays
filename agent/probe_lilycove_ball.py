@@ -5,7 +5,7 @@ and prints what the pickup path sees: the live grid around the ball, the ball li
 collectable_balls() accepts, the stand tiles collect_item() would walk to, and per side the
 passable and path verdicts.
 
-    probe_lilycove_ball.py [SNAPSHOT]   -> states/probe/lilycove.ss
+    probe_lilycove_ball.py [SNAPSHOT]   -> states/fixtures/lilycove.ss
 """
 import os
 import shutil
@@ -18,9 +18,9 @@ import rowe_symbols as S
 from nav import Grid
 from routines import Errands
 
-SNAPSHOT = sys.argv[1] if len(sys.argv) > 1 else "states/route101.ss"
-SRC = "states/probe/lily_src.ss"
-OUT = "states/probe/lilycove.ss"
+SNAPSHOT = sys.argv[1] if len(sys.argv) > 1 else "states/fixtures/route101.ss"
+SRC = "states/fixtures/lily_src.ss"
+OUT = "states/fixtures/lilycove.ss"
 LILYCOVE = (0, 5)
 BALL = (57, 12)
 

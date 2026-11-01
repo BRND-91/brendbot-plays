@@ -21,12 +21,12 @@ def cramorant() -> BattleMon:
 def pidgeotto() -> BattleMon:
     return BattleMon(battler=0, species=PIDGEOTTO, level=22, hp=61, max_hp=65, moves=(TACKLE, GUST, 0, 0),
                      pp=(35, 35, 0, 0), types=(0, 2, MYSTERY), ability=0, status1=0, stat_stages=(6,) * 8,
-                     nickname="Pidgeotto", atk=42, dfn=36, spd=45, sp_atk=35, sp_def=36)
+                     nickname="Pidgeotto", personality=0, atk=42, dfn=36, spd=45, sp_atk=35, sp_def=36)
 
 
 def mon(slot, species, name, move, atk=45) -> PartyMon:
     return PartyMon(slot=slot, species=species, level=21, hp=60, max_hp=60, moves=(move, 0, 0, 0), pp=(20, 0, 0, 0),
-                    status=0, experience=0, friendship=0, nickname=name, personality=0,
+                    status=0, experience=0, friendship=0, nickname=name, personality=slot,
                     atk=atk, dfn=35, spd=30, sp_atk=25, sp_def=30)
 
 

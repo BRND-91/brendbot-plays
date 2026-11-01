@@ -76,6 +76,7 @@ class BattleMon:
     status1: int
     stat_stages: tuple
     nickname: str
+    personality: int = 0
     atk: int = 0
     dfn: int = 0
     spd: int = 0
@@ -178,6 +179,7 @@ def battle_mon(raw: bytes, battler: int) -> BattleMon:
         status1=struct.unpack_from("<I", raw, S.BM_STATUS1)[0],
         stat_stages=tuple(raw[S.BM_STAT_STAGES:S.BM_STAT_STAGES + 8]),
         nickname=decode_text(raw[S.BM_NICKNAME:S.BM_NICKNAME + 10]),
+        personality=struct.unpack_from("<I", raw, S.BM_PERSONALITY)[0],
     )
 
 

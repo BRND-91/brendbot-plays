@@ -14,7 +14,7 @@ from test_battle_engine import BITE, HERDIER, MYSTERY, PARTY, nosepass  # noqa: 
 def herdier_battler() -> BattleMon:
     return BattleMon(battler=0, species=HERDIER, level=20, hp=60, max_hp=60, moves=(BITE, 0, 0, 0), pp=(20, 0, 0, 0),
                      types=(0, 0, MYSTERY), ability=0, status1=0, stat_stages=(6,) * 8, nickname="Herdier",
-                     atk=45, dfn=35, spd=30, sp_atk=25, sp_def=30)
+                     personality=2, atk=45, dfn=35, spd=30, sp_atk=25, sp_def=30)
 
 
 def test_winning_lead_still_has_a_bench_pick():

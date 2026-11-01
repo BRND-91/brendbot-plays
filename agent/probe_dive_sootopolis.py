@@ -2,7 +2,7 @@
 save, report the diveable tiles the grid reaches and their metatile behavior (0x14 is Sootopolis
 deep water), then drive the real dive and read whether the map changed and the graph gained a node.
 Answers whether explore's new off-cluster dive actually submerges here, the part the unit test
-cannot reach. Runs off states/probe so the live supervisor keeps its own files."""
+cannot reach. Runs off states/fixtures so the live supervisor keeps its own files."""
 import json
 import os
 import shutil
@@ -15,8 +15,8 @@ import rowe_map
 import rowe_rom
 import rowe_symbols as S
 
-LIVE = "states"
-SCRATCH = "states/probe"
+LIVE = "states/fixtures"
+SCRATCH = "states/fixtures"
 BEH = {0x11: "SEMI_DEEP_WATER", 0x12: "DEEP_WATER", 0x14: "SOOTOPOLIS_DEEP_WATER"}
 
 

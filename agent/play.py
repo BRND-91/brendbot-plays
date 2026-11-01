@@ -2084,8 +2084,12 @@ class Player:
         reaches now (`_landing_exits`), never the map's full adjacency, so a pocket entered by water
         that reaches only the border back (the surf pocket east of Slateport, whose adjacency also
         lists 0,26 and 0,32 the grid cannot walk to) grinds toward the reachable grass instead of
-        stalling the grind against a neighbour it cannot cross. None when no reachable map holds
-        grass, so the caller falls back to `here`."""
+        stalling the grind against a neighbour it cannot cross. Underwater maps are skipped whole,
+        candidate and traversal both: the seabed holds no grass, and the numbering that marks a grass
+        route (num >= 16) also spans the seabed pockets off Sootopolis (0,50..0,52), which 24,5
+        borders and the walk can swim to but which demote would then target as an unroutable grind,
+        churning the supervisor. None when no reachable map holds grass, so the caller falls back to
+        `here`."""
         moves = self.field_moves()
         seen = {here}
         q: collections.deque = collections.deque()
@@ -2095,6 +2099,8 @@ class Player:
                 q.append(nb)
         while q:
             node = q.popleft()
+            if rowe_rom.is_underwater(*node):
+                continue  # seabed holds no grass, and a grind never routes across it (the 24,5 bounce)
             if node[0] == 0 and node[1] >= 16:
                 return node
             for nb in self.graph.neighbors(node):

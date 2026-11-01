@@ -18,3 +18,12 @@ def test_lavaridge_gym_spans_both_floors():
 def test_interior_floors_carry_no_overworld_connection():
     for m in play.gym_map_set((4, 1)) - {(4, 1)}:
         assert rowe_rom.map_connections(*m) == []
+
+
+def test_sootopolis_gym_excludes_the_dive_only_city():
+    # Sootopolis gym is map (15, 0) with its leader floor (15, 1); the entry's exit warps to
+    # Sootopolis City (0, 7), a dive-only CITY that carries no overworld connections. The old
+    # no-connection filter read that as an interior map and cascaded all 13 city buildings and the
+    # underwater maps into the set, so gym_step swept the town for a leader behind a door it never
+    # took. Red under that filter (returns the 15-map town set); green when the walk tests INDOOR.
+    assert play.gym_map_set((15, 0)) == frozenset({(15, 0), (15, 1)})
