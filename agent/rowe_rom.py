@@ -72,9 +72,13 @@ MART_LAYOUT_ID = 63
 # music +0x10, mapLayoutId +0x12 (head matches vanilla, as rowe_symbols already relies on)
 MAPHDR_LAYOUT = 0x0
 MAPHDR_EVENTS = 0x4
+MAPHDR_SCRIPTS = 0x8
 MAPHDR_CONNECTIONS = 0xC
 MAPHDR_MUSIC = 0x10
 MAPHDR_LAYOUT_ID = 0x12
+MAPHDR_MAP_TYPE = 0x17
+MAP_TYPE_UNDERWATER = 5
+MAP_SCRIPT_SCAN_CAP = 64  # map-script table entries, terminated by a 0 type byte; cap guards a garbage header pointer
 GYM_MUSIC = 0x14F  # every gym interior shares this track; the eight entrance maps plus a few inner floors
 OBJ_STRIDE = 24
 OBJ_X = 0x4         # s16 x, s16 y follow
@@ -453,14 +457,105 @@ def map_count(group: int) -> int:
     return n
 
 
+# script command lengths (operand bytes after the opcode) for the ON_RESUME / ON_DIVE_WARP
+# scripts that set a surface point: getplayerxy, compare_var_to_value, goto_if, goto, setdivewarp,
+# end. setdivewarp is 0x40, unshifted from vanilla; the rest of the command table is not needed
+# because an unknown opcode just ends that branch of the walk.
+_SCRIPT_CMD_LEN = {0x42: 4, 0x21: 4, 0x06: 5, 0x05: 4, 0x40: 7, 0x02: 0}
+SETDIVEWARP = 0x40
+DIVE_SCRIPT_TYPES = frozenset({5, 6})  # MAP_SCRIPT_ON_RESUME, MAP_SCRIPT_ON_DIVE_WARP
+
+
+def _warp_in_layout(group: int, num: int, x: int, y: int) -> bool:
+    """A setdivewarp destination that names a real map and a tile on its layout, or the (-1, -1)
+    that reuses the warp's own coordinate; a misread yields coords off the layout and is dropped."""
+    if (x, y) == (-1, -1):
+        return map_header(group, num) is not None
+    c = map_cells(group, num)
+    return c is not None and 0 <= x < c[0] and 0 <= y < c[1]
+
+
+def _divewarp_targets(script_addr: int) -> set:
+    """Surface maps of every setdivewarp reached from script_addr, following goto and goto_if.
+    A branch that hits an opcode outside _SCRIPT_CMD_LEN ends there, so a target past an unknown
+    command is missed rather than misread, and every target is bounds-checked before it counts."""
+    rom = _rom()
+    out = set()
+    work = [_fo(script_addr)]
+    seen = set()
+    while work:
+        a = work.pop()
+        while a not in seen:
+            seen.add(a)
+            op = rom[a]
+            if op not in _SCRIPT_CMD_LEN:
+                break
+            if op == SETDIVEWARP:
+                dg, dn = rom[a + 1], rom[a + 2]
+                x, y = struct.unpack_from("<hh", rom, a + 4)
+                if _warp_in_layout(dg, dn, x, y):
+                    out.add((dg, dn))
+            if op == 0x06:  # goto_if: condition byte then a u32 target, with a fallthrough
+                tgt = struct.unpack_from("<I", rom, a + 2)[0]
+                if _in_rom(tgt):
+                    work.append(_fo(tgt))
+            elif op == 0x05:  # goto: u32 target, no fallthrough
+                tgt = struct.unpack_from("<I", rom, a + 1)[0]
+                if _in_rom(tgt):
+                    work.append(_fo(tgt))
+                break
+            elif op == 0x02:  # end
+                break
+            a += 1 + _SCRIPT_CMD_LEN[op]
+    return out
+
+
 @lru_cache(maxsize=1)
-def world_edges() -> dict:
-    """{(group, num): maps one connection or one warp away} for every map in the ROM, so a
-    route can be planned to a map nobody has walked yet."""
+def dive_script_edges() -> dict:
+    """{map: {surface maps}} from each map's +0x08 map-script table. An ON_RESUME or ON_DIVE_WARP
+    script runs setdivewarp to fix where an emerge from that underwater map surfaces, the
+    map-to-map link world_edges would otherwise miss because it reads the events and connections
+    tables only. Sootopolis is reached this way, (24, 5) -> (0, 7)."""
+    rom = _rom()
     out = {}
     for g in range(MAP_GROUP_COUNT):
         for n in range(map_count(g)):
+            h = map_header(g, n)
+            if h is None:
+                continue
+            msc = struct.unpack_from("<I", rom, h + MAPHDR_SCRIPTS)[0]
+            if not _in_rom(msc):
+                continue
+            o = _fo(msc)
+            for _ in range(MAP_SCRIPT_SCAN_CAP):
+                if o + 5 > len(rom) or rom[o] == 0:
+                    break
+                t, p = rom[o], struct.unpack_from("<I", rom, o + 1)[0]
+                if t in DIVE_SCRIPT_TYPES and _in_rom(p):
+                    tgts = _divewarp_targets(p)
+                    if tgts:
+                        out.setdefault((g, n), set()).update(tgts)
+                o += 5
+    return out
+
+
+def is_underwater(group: int, num: int) -> bool:
+    """A MAP_TYPE_UNDERWATER map, whose deep-water metatiles are the floor the player swims over
+    rather than surf-only water nav must mount onto."""
+    h = map_header(group, num)
+    return h is not None and _rom()[h + MAPHDR_MAP_TYPE] == MAP_TYPE_UNDERWATER
+
+
+@lru_cache(maxsize=1)
+def world_edges() -> dict:
+    """{(group, num): maps one connection, warp, or dive-warp away} for every map in the ROM, so
+    a route can be planned to a map nobody has walked yet."""
+    out = {}
+    dive = dive_script_edges()
+    for g in range(MAP_GROUP_COUNT):
+        for n in range(map_count(g)):
             dests = {d for _, d in map_connections(g, n)} | {d for *_, d in map_warps(g, n)}
+            dests |= dive.get((g, n), set())
             out.setdefault((g, n), set()).update(dests)
             for d in dests:
                 out.setdefault(d, set())

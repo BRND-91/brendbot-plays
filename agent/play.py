@@ -565,6 +565,15 @@ def best_fill(team: list, box: list, builds: list):
     return best[0] if best else None
 
 
+def write_json(path: str, obj) -> None:
+    """Atomic json write: a crash mid-write leaves the previous file instead of a truncated one
+    that json.load trips on, which would then fail every relaunch."""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
+
+
 def keep_snapshot(exit_reason: str, party_len: int, box_len: int) -> bool:
     """Whether the exit leaves the state file alone. A signal lands wherever the loop was, the storage
     PC between a deposit and its withdraw included, so only the loop's own responsive snapshots stand;
@@ -660,8 +669,8 @@ class Player:
         self._dived: set = set()  # regions whose off-cluster dive was already tried, so it fires once
         self._visit_log: collections.deque = collections.deque(maxlen=CYCLE_WINDOW)  # (map, maps-seen) per landing
         self._prompt_taps = 0
-        self.switch_to: str | None = None  # nickname the next party menu sends out
-        self._switch_active: str | None = None  # active mon the voluntary-switch fail count tracks
+        self.switch_to: int | None = None  # personality the next party menu sends out
+        self._switch_active: int | None = None  # personality the voluntary-switch fail count tracks
         self._switch_fails = 0
         self._wild_switched = False  # a wild fight gets one voluntary switch: the low lead out, the finisher in
 
@@ -1006,15 +1015,18 @@ class Player:
                 # party as a whole is spent, and the flee below walks to a Center instead of
                 # fleeing fight after fight on the same low lead
                 party = self.g.party()
-                healthy = [m for m in party if m.nickname != me.nickname and can_attack(m)
+                healthy = [m for m in party if m.personality != me.personality and can_attack(m)
                            and m.hp * 100 >= m.max_hp * HEAL_HP_PERCENT]
                 # needs_heal reads party slot 0, so a fainted lead kept it true after the forced
                 # switch and sent a full-HP Greedent back out "on low HP"; the switch is for the
                 # mon on the field being low, read off its own bar
                 low = me.hp * 100 < me.max_hp * HEAL_HP_PERCENT
-                if healthy and low:
+                # _open_wild_switch drives the single-battle action grid, so a wild double is left
+                # to fight; party_menu_step covers a forced replacement there
+                double = bool(self.g.battle_type_flags() & BATTLE_TYPE_DOUBLE)
+                if healthy and low and not double:
                     slot = max(healthy, key=lambda m: (lambda d, t: d - t)(*edge(as_battler(m), foes))).slot
-                    if not self._wild_switched and self._switch_budget(me.nickname):
+                    if not self._wild_switched and self._switch_budget(me.personality):
                         print(f"  switch: {me.nickname} {me.hp}/{me.max_hp} out on low HP, slot {slot} in", flush=True)
                         self._open_wild_switch(slot)
                         return
@@ -1044,9 +1056,9 @@ class Player:
         if flags & BATTLE_TYPE_TRAINER and not flags & BATTLE_TYPE_DOUBLE:
             party = self.g.party()
             slot = best_switch(party, me, foes, SWITCH_MARGIN)
-            if slot is not None and self._switch_budget(me.nickname):
+            if slot is not None and self._switch_budget(me.personality):
                 print(f"  switch: {me.nickname} out on matchup, slot {slot} in", flush=True)
-                self.switch_to = party[slot].nickname
+                self.switch_to = party[slot].personality
                 # after a foe faints the game asks "will you switch?" w/ Yes on cursor 0, the
                 # same cursor as Fight, and Yes opens the party menu as a free switch. A first;
                 # a voluntary switch opens the move list instead, so back out and take Pokémon
@@ -1070,14 +1082,14 @@ class Player:
                 self.switch_to = None
                 print(f"  switch stalled: party menu never opened (cb2 {self.g.callback2():#x})", flush=True)
                 return
-        if not flags & BATTLE_TYPE_TRAINER and self._exp_lead(me) and outmatched(me, foes):
+        if not flags & BATTLE_TYPE_TRAINER and not flags & BATTLE_TYPE_DOUBLE and self._exp_lead(me) and outmatched(me, foes):
             # the lowest mon leads so each wild fight pays it an exp share, and it fights the round
             # itself to earn that exp, stepping out only when a foe carries a hit worth half its bar.
             # a healthy lead swapped on a close level gap handed the foe a free turn every fight for
             # an exp split it already gets by standing on the field, the switch-for-no-reason a
             # viewer sees; the low-HP switch above still covers a fight that turns.
             pick = strongest_bench(self.g.party(), me, foes)
-            if pick is not None and not self._wild_switched and self._switch_budget(me.nickname):
+            if pick is not None and not self._wild_switched and self._switch_budget(me.personality):
                 print(f"  switch: {me.nickname} L{me.level} led for exp, slot {pick[0]} in", flush=True)
                 self._open_wild_switch(pick[0])
                 return
@@ -1090,7 +1102,7 @@ class Player:
             # the helper switch spends the same budget as the matchup and low-HP switches: a Shift
             # that never puts the helper out otherwise re-decides itself every turn (21 rounds of
             # "Stoutland out, slot 1 in" on a Torkoal before the stall exit)
-            if self._switch_budget(me.nickname):
+            if self._switch_budget(me.personality):
                 self._open_wild_switch(plan[1])
                 return
             print(f"  switch budget spent on {me.nickname}, fighting instead", flush=True)
@@ -1121,7 +1133,7 @@ class Player:
         under Fight and no faint prompt is in the way, so party_menu_step sends the mon out next
         step. A menu that never opens drops the plan, since a slot left here would be spent by
         the next party menu that opens for any other reason, after the party order has moved on."""
-        self.switch_to = self.g.party()[slot].nickname
+        self.switch_to = self.g.party()[slot].personality
         # the action grid ignores input during its opening slide-in (cb2 holds a pre-input wait
         # state), so a blind single DOWN leaves the cursor on Fight and A opens the move list,
         # not the party menu. Retry the whole open with settle frames between, which both
@@ -1209,10 +1221,12 @@ class Player:
         # before one resolved would send the mon just recalled straight back out
         # in a double the partner is on the field too; picking it gets "is already in battle!" and
         # the menu ate every press (Fortree's Flint + Edwardo fight, ten STALLs on Greedent)
-        fielded = {m.nickname for m in mons[0::2]}
-        bench = [m for m in party if m.nickname not in fielded]
-        target = next((m.slot for m in bench if m.nickname == name and m.hp > 0), None)
-        if target is None and active.hp == 0:
+        fielded = {m.personality for m in mons[0::2]}
+        bench = [m for m in party if m.personality not in fielded]
+        target = next((m.slot for m in bench if m.personality == name and m.hp > 0), None)
+        if target is None and any(m.hp == 0 for m in mons[0::2]):
+            # a fielded mon fainted (the lead, or the partner in a double), so the menu is a forced
+            # replacement that ignores B; pick the best live bench mon instead of parking on Cancel
             foes = [m for m in mons[1::2] if m.hp > 0]
             target = best_switch(bench, active, foes)
             if target is None:
@@ -1259,19 +1273,19 @@ class Player:
         # reads it there re-decides the same switch; hold until the pick is on the field or the
         # controller has left the action menu
         for _ in range(10):
-            if self.g.battlers()[0].nickname == party[target].nickname or not self.g.in_battle() \
+            if self.g.battlers()[0].personality == party[target].personality or not self.g.in_battle() \
                     or self.e.u32(S.BATTLER0_CONTROLLER_FUNC) not in S.PLAYER_CHOOSE_ACTION_FUNCS:
                 break
             self.run(30)
 
-    def _switch_budget(self, active_name: str) -> bool:
+    def _switch_budget(self, active_pid: int) -> bool:
         """True while a matchup switch is still worth trying for the mon now choosing. A switch
         decided for the mon that already chose last turn never put a new one out (a double-battle
         send the party menu could not land), so each repeat spends one of SWITCH_FAIL_CAP tries and
         a different active resets the count. Caps the retries so a non-landing switch falls through
         to Fight instead of re-deciding the same switch every turn with no floor."""
-        if active_name != self._switch_active:
-            self._switch_active, self._switch_fails = active_name, 0
+        if active_pid != self._switch_active:
+            self._switch_active, self._switch_fails = active_pid, 0
         else:
             self._switch_fails += 1
         return self._switch_fails < SWITCH_FAIL_CAP
@@ -1350,7 +1364,7 @@ class Player:
             full = sorted(m["personality"] for m in party)
             if full != self._party_full:
                 self._party_full = full
-                json.dump(full, open(self.state_file("party_full.json"), "w"))
+                write_json(self.state_file("party_full.json"), full)
         boxes = [{
             "box": m.box, "slot": m.position, "species": m.species, "name": m.nickname,
             "level": rowe_rom.level_from_exp(m.species, m.experience), "shiny": m.shiny,
@@ -1567,7 +1581,7 @@ class Player:
                   f"-> {r}, BP {bp} -> {self.g.battle_points()}", flush=True)
             if r == "absent":
                 declined.add((mon.species, move))
-                json.dump(sorted(declined), open(declined_path, "w"))
+                write_json(declined_path, sorted(declined))
         self.refresh_wanted()
 
     def state_file(self, name: str) -> str:
@@ -1753,14 +1767,20 @@ class Player:
                 how = f"dir {c.direction}"
                 break
         else:
-            warp_rank = None
-            if lr is not None:
-                rank, dest_warps = lr[0], rowe_rom.map_warps(*hop)
+            if hop in rowe_rom.dive_script_edges().get(here, set()):
+                # here is underwater and hop is where its setdivewarp surfaces (Sootopolis from
+                # (24, 5)), a link the ROM connection table never carries, so this is an emerge
+                status = self.errands.take_dive(rowe_map.DIR_EMERGE, surf=surf, tools=self.field_moves())
+                how = "emerge"
+            else:
+                warp_rank = None
+                if lr is not None:
+                    rank, dest_warps = lr[0], rowe_rom.map_warps(*hop)
 
-                def warp_rank(wp: rowe_map.Warp) -> tuple:
-                    return rank(dest_warps[wp.dest_warp][:2]) if wp.dest_warp < len(dest_warps) else (2, 0)
-            status = self.errands.take_warp(hop, surf=surf, rank=warp_rank, tools=self.field_moves())
-            how = "warp"
+                    def warp_rank(wp: rowe_map.Warp) -> tuple:
+                        return rank(dest_warps[wp.dest_warp][:2]) if wp.dest_warp < len(dest_warps) else (2, 0)
+                status = self.errands.take_warp(hop, surf=surf, rank=warp_rank, tools=self.field_moves())
+                how = "warp"
         after = self.g.position()[2:]
         if status == "battle":
             result = "battle"
@@ -1819,7 +1839,10 @@ class Player:
         stands, since a map split by water or a ledge (Route 110 either side of the cycling road)
         reaches a border from one region and not the other. For a warp hop, whether any warp
         tile to it is enterable at all; None when `hop` is neither a connection nor a warp."""
-        w, h, cells = rowe_rom.map_cells(*here)
+        layout = rowe_rom.map_cells(*here)
+        if layout is None:
+            return None
+        w, h, cells = layout
         grid = Grid.from_cells(w, h, cells)
         grid._behavior = rowe_rom.metatile_behavior(*here)
         for direction, dest in rowe_rom.map_connections(*here):
@@ -1953,7 +1976,10 @@ class Player:
             return OLDALE
         x, y, _, _ = self.g.position()
         grid = Grid(self.e)
-        return nearer_border(tier, (x, y), (grid.width, grid.height), rowe_rom.map_connections(*here))
+        # grid.width/height carry the MAP_OFFSET pad on each side; the border walk is measured
+        # against the real map size, or east and south read farther than they are
+        w, h = grid.width - 2 * S.MAP_OFFSET, grid.height - 2 * S.MAP_OFFSET
+        return nearer_border(tier, (x, y), (w, h), rowe_rom.map_connections(*here))
 
     def travel_toward(self, dest: tuple) -> None:
         here = self.g.position()[2:]
@@ -1962,11 +1988,13 @@ class Player:
         if here in self._gyms:
             # the graph hop out of a room gym is its exit mat, which an inner room has no walking
             # path to; three jams gated the warp and every later route out came up empty
-            out = min(self.graph.world.get(here, set()) - {here})
-            r = self.errands.descend_gym(out)
-            print(f"gym exit {list(here)} -> {r} at {self.g.position()[:2]}", flush=True)
-            if r in ("map_changed", "warped", "battle"):
-                return
+            exits = self.graph.world.get(here, set()) - {here}
+            if exits:
+                out = min(exits)
+                r = self.errands.descend_gym(out)
+                print(f"gym exit {list(here)} -> {r} at {self.g.position()[:2]}", flush=True)
+                if r in ("map_changed", "warped", "battle"):
+                    return
         region = self.region()
         # the destination is never a run-local block: a gym entered and left again for a heal
         # detour reads as a bounce by its neighbours and as a dead end by its exits, and once it
@@ -2160,11 +2188,16 @@ class Player:
             town = self.service_town(here)
             if here in SERVICE_MAPS[town]:
                 bought = self.errands.restock_at(town, SERVICE[town][1], self.shopping, surf="SURF" in self.field_moves(), downgrade=HP_TIERS)
-                print(f"restock -> {'interrupted' if bought is None else bought} at {self.g.position()}", flush=True)
+                print(f"restock -> {bought} at {self.g.position()}", flush=True)
+                if bought == "battle":
+                    return
                 if bought is not None:
                     self.shopping = []
                     self.mart_trek = False
-                return
+                    return
+                # the Mart warp is unreachable from this tile: stop the trek and fall through to
+                # normal nav so the player moves off the spot instead of re-running the blocked warp
+                self.mart_trek = False
             if self.mart_trek:
                 self.travel_toward(town)
                 return
@@ -2279,10 +2312,12 @@ class Player:
                 # entry); the sweep turns gates at random and never lands back on a recorded
                 # state, so the way back onto the route is out and in again
                 self._route_resets[gym] = self._route_resets.get(gym, 0) + 1
-                out = min(self.graph.world.get(gym, set()) - {gym})
-                r = self.errands.descend_gym(out)
-                print(f"gym: route reset {self._route_resets[gym]}/{ROUTE_RESETS}, out to {list(out)} -> {r}", flush=True)
-                return
+                exits = self.graph.world.get(gym, set()) - {gym}
+                if exits:
+                    out = min(exits)
+                    r = self.errands.descend_gym(out)
+                    print(f"gym: route reset {self._route_resets[gym]}/{ROUTE_RESETS}, out to {list(out)} -> {r}", flush=True)
+                    return
         r = self.errands.challenge_leader(stand)
         print(f"gym: leader -> {r} at {self.g.position()[:2]} stand {stand}", flush=True)
         if r == "unreachable":
@@ -2530,6 +2565,12 @@ def main() -> None:
         player.exit_reason = "stall" if player.stalled else "signal"
     except GoalExit as g:
         player.exit_reason = str(g)
+    except Exception:
+        # a crash lands wherever the loop was, often a menu or the PC; keep the last responsive
+        # snapshot rather than save the wedged frame, or the same exception repeats every relaunch
+        player.keep_state = True
+        player.exit_reason = "crash"
+        raise
     finally:
         # never persist a mid-battle frame as the resume point: a timer exit inside a battle saves
         # that battle, and a battle that then softlocks replays on every relaunch, the loop the

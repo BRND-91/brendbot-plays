@@ -89,6 +89,7 @@ class Grid:
     # BFS from a multi-level tile (a surfer under the bridge) starts at the real carried height
     player_tile = None
     player_elev = ELEV_LAND
+    _underwater = False  # set per live map in __init__; a from_cells grid has no map type
 
     def __init__(self, emu: eb.Emu):
         self.e = emu
@@ -104,6 +105,7 @@ class Grid:
         state = GameState(emu)
         _, _, group, num = state.position()
         self._behavior = rowe_rom.metatile_behavior(group, num)
+        self._underwater = rowe_rom.is_underwater(group, num)
         for x, y, flag in rowe_map.static_objects(emu):
             if not (flag and state.flag(flag)):
                 self.blocked_by_npc.add((x, y))
@@ -191,7 +193,7 @@ class Grid:
         if self._is_waterfall(x, y):
             return False
         if self._is_water(x, y):
-            return surf  # water crosses only under Surf
+            return True if self._underwater else surf  # underwater the deep water is the floor, else Surf-only
         elev = c >> S.GRID_ELEVATION_SHIFT
         if carried == ELEV_TRANSITION or elev in (ELEV_TRANSITION, ELEV_MULTI) or elev == carried:
             return True

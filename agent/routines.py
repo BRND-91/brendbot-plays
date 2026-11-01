@@ -9,6 +9,7 @@ from typing import Callable
 
 import emu_boot as eb
 import rowe_map
+import rowe_rom
 import rowe_symbols as S
 from nav import DIRS, GATE_SETTLE_FRAMES, Grid, Navigator
 
@@ -109,12 +110,29 @@ class Errands:
         "Would you like to Dive?" prompt, and read the warp. "map_changed", "battle", "stuck", or
         "unreachable".
 
-        DIR_EMERGE (surfacing into Sootopolis) returns "unreachable": an underwater map carries no
-        diveable tile, its surface point is a fixed dive-warp coordinate the ROM layout does not
-        expose, so the emerge drive needs the underwater map observed live before it can be built."""
+        DIR_EMERGE surfaces from an underwater map: pressedBButton runs the emerge script, which
+        warps to the surface point this map's setdivewarp set (Sootopolis, from (24, 5)). Most open
+        tiles emerge; a few under land refuse, so the current tile then the nearest reachable ones
+        are tried until the map changes."""
         if direction == rowe_map.DIR_EMERGE:
-            self.log("take_dive emerge: underwater surface point needs a live observe, unbuilt")
-            return "unreachable"
+            before = self.map_id()
+            grid = Grid(self.e)
+            grid.tools = tools
+            x, y, *_ = self.g.position()
+            nearby = sorted((t for t in grid.reachable((x, y), surf) if t != (x, y)),
+                            key=lambda t: abs(t[0] - x) + abs(t[1] - y))
+            for tile in [(x, y)] + nearby[:12]:  # 12 fallbacks past the entry tile, for an unable-to-emerge spot
+                if tile != (x, y):
+                    r = self.nav.walk_to(tile, surf=surf, tools=tools)
+                    if r == "battle":
+                        return r
+                    if r != "arrived":
+                        continue
+                self.run(24, eb.KEY_B)
+                self.run(120, 0)
+                if self._landed(before):
+                    return "map_changed"
+            return "stuck"
         grid = Grid(self.e)
         grid.tools = tools
         x, y, *_ = self.g.position()
@@ -345,8 +363,14 @@ class Errands:
         return self.healed()
 
     def healed(self) -> bool:
+        # a Center restores HP and PP together; testing HP alone lets a top-off that fired for 0 PP
+        # see full HP and break the nurse loop before the heal lands, leaving the PP empty
         party = self.g.party()
-        return bool(party) and all(m.hp == m.max_hp for m in party)
+        if not party:
+            return False
+        return all(m.hp == m.max_hp
+                   and all(pp >= rowe_rom.move(mid).pp for mid, pp in zip(m.moves, m.pp) if mid)
+                   for m in party)
 
     def _box_menu_to(self, target: int) -> bool:
         """Move the box main-menu cursor (Move/Withdraw/Deposit/Move items/See ya) onto `target`."""
@@ -378,7 +402,11 @@ class Errands:
             return False
         before = self.g.party()
         outgoing = before[out_slot].personality
-        incoming = next(bm.personality for bm in self.g.boxes() if bm.slot == box_slot)
+        incoming = next((bm.personality for bm in self.g.boxes() if bm.slot == box_slot), None)
+        if incoming is None:
+            self._close_pc(cb_field)
+            self.log(f"pc swap: no box mon at slot {box_slot}")
+            return False
         self._deposit(out_slot, len(before))
         self._withdraw(box_slot)
         self._close_pc(cb_field)
@@ -602,6 +630,15 @@ class Errands:
             return (group, num, t[0], t[1])
 
         elev = grid.cell(x, y) >> S.GRID_ELEVATION_SHIFT
+
+        def resync() -> None:
+            # a walk moved the player, so grid, coords and elevation describe the old tile; a battle
+            # or a warp changes the whole map. Re-read before the next passable/path check
+            nonlocal grid, x, y, elev
+            grid = Grid(self.e)
+            x, y = self.g.position()[:2]
+            elev = grid.cell(x, y) >> S.GRID_ELEVATION_SHIFT
+
         leader = (stand[0], stand[1] - 1)
         people = sorted((o for o in grid.blocked_by_npc if o != leader and mk(o) not in done),
                         key=lambda t: abs(t[0] - x) + abs(t[1] - y))
@@ -615,6 +652,7 @@ class Errands:
                     done.add(mk(obj))
                     return r
                 if r != "arrived":
+                    resync()
                     break
                 self.tap(key)
                 self.run(10, 0)
@@ -660,6 +698,7 @@ class Errands:
             if r == "battle":
                 return r
             if r != "arrived":
+                resync()
                 continue
             if door:
                 self.run(8, eb.KEY_UP)
@@ -674,6 +713,7 @@ class Errands:
             if abs(nx - tile[0]) + abs(ny - tile[1]) > 1:
                 return "warped"
             done.add(mk(tile))
+            resync()
         return "exhausted"
 
     def collect_item(self, ball: tuple, surf: bool = False) -> str:
@@ -780,7 +820,7 @@ class Errands:
         """From the town or its Mart: reach the Mart, buy the (item id, qty) list, come back out.
         Every Mart shares the Oldale layout (11x8, same tileset), so the counter tile holds.
         Returns {item id: bought} once the counter was worked, empty when the list never opened,
-        None when a battle or an unknown map cut the trip short."""
+        "battle" when a wild battle cuts in, None when the Mart counter was never reached."""
         for _ in range(6):
             here = self.map_id()
             if here == town:
@@ -802,7 +842,7 @@ class Errands:
                 return None
             self.log(f"restock: {here} -> {r} at {self.g.position()}")
             if r == "battle":
-                return None
+                return "battle"
             self.run(60, 0)
         return None
 
