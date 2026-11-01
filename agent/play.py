@@ -242,6 +242,7 @@ INTRO_IDLE_FUNCS = frozenset({0x083AA958, 0x083AA964, 0x083AA968})
 INTRO_STEP_FRAMES = 180     # frames to let one intro text box clear after an A before the next press
 INTRO_PROMOTE_FRAMES = 300  # frames to wait at the post-intro idle for the action menu to open, no press
 INTRO_PRESSES = 8           # A presses one battle_step spends advancing an intro before it yields
+SELECTION_SCRIPT_RETRIES = 8  # bounded B presses to leave the no-PP selection script box
 # one frame of hold is a press edge to the ROM's newKeys read; the release frames give the next
 # press a fresh edge. The old 8+12 spent 20 frames (333 ms at the stream's real-time clock) per key
 TAP_HOLD = 2
@@ -1035,30 +1036,7 @@ class Player:
             return
         self._prompt_taps = 0
         if not self.g.choosing(b):
-            # the chooser b's controller is not on the action pick: the grid is drawn but the turn is
-            # still running (an intro, a switch animation, the foe's move, a text box), so a decision
-            # read now re-issues the leaving mon, the four-switch Boltund fight. Keying on b, not
-            # battler 0, reads a double on its real chooser, battler 2 while battler 0 idles at
-            # 0x83aa958. One A advances whatever text holds it, but the press waits for the controller
-            # to actually move before another battle_step can fire again: over-pressing A while b sits
-            # at its post-intro idle desyncs a wild double into a freeze, so at the idle wait for the
-            # engine to open the action menu instead of mashing.
-            for _ in range(INTRO_PRESSES):
-                if self.g.choosing(0) or self.g.choosing(2) or not self.g.in_battle():
-                    return
-                before = self._battle_pulse()
-                self.tap(eb.KEY_A)
-                for _ in range(INTRO_STEP_FRAMES // INTRO_POLL_FRAMES):
-                    self.run(INTRO_POLL_FRAMES)
-                    if self.g.choosing(0) or self.g.choosing(2):
-                        return
-                    if self._battle_pulse() != before:
-                        break
-                if self.g.controller_func(0) in INTRO_IDLE_FUNCS or self.g.controller_func(2) in INTRO_IDLE_FUNCS:
-                    for _ in range(INTRO_PROMOTE_FRAMES // INTRO_POLL_FRAMES):
-                        self.run(INTRO_POLL_FRAMES)
-                        if self.g.choosing(0) or self.g.choosing(2):
-                            return
+            self._advance_intro(b, me, foes)
             return
         disabled = self.g.disabled_move(b)
         # Run escapes the whole encounter and only works from the lead battler; a non-lead mon in a
@@ -1110,7 +1088,9 @@ class Player:
                         return
                 elif not healthy:
                     self.need_heal = True
-            if me.hp * 100 < me.max_hp * POTION_HP_PERCENT:
+            if me.hp * 100 < me.max_hp * POTION_HP_PERCENT and any(me.pp):
+                # a potion on a lead with no PP left heals a mon that still cannot attack, so the
+                # 0-PP low lead takes the switch above (or the flee below) over a wasted item
                 item = best_hp_item(self.g.medicine(), me.max_hp - me.hp)
                 if item is not None:
                     slot, iid, _ = item
@@ -1198,6 +1178,41 @@ class Player:
             return
         self.steer_move_cursor(b, plan[1] if plan is not None else self.pick_move(me, foes))
         self.confirm_move(b, me)
+
+    def _advance_intro(self, b: int, me, foes) -> None:
+        """Advance the turn while b's controller is off the action pick (an intro, a switch or foe
+        animation, a text box, or the no-PP selection box). The grid is drawn but a decision read
+        now re-issues the leaving mon, so no action key goes out until the engine opens the menu.
+        Keying on b reads a double on its real chooser, battler 2 while battler 0 idles at 0x83aa958.
+        At the no-PP box (comm 6) only B leaves it; at a move list bounced to idle (comm 3) steer to a
+        PP'd slot and confirm, since an A there re-confirms the refused slot, the Seaking no-PP loop."""
+        comm = self.g.comm(b)
+        if comm == S.SELECTION_SCRIPT_COMM_STATE:
+            self.press_until(eb.KEY_B,
+                             lambda: self.g.comm(b) != S.SELECTION_SCRIPT_COMM_STATE
+                             or not self.g.in_battle(),
+                             timeout=30, tries=SELECTION_SCRIPT_RETRIES)
+            return
+        if comm == S.MOVE_LIST_COMM_STATE:
+            self.steer_move_cursor(b, self.pick_move(me, foes))
+            self.confirm_move(b, me)
+            return
+        for _ in range(INTRO_PRESSES):
+            if self.g.choosing(0) or self.g.choosing(2) or not self.g.in_battle():
+                return
+            before = self._battle_pulse()
+            self.tap(eb.KEY_A)
+            for _ in range(INTRO_STEP_FRAMES // INTRO_POLL_FRAMES):
+                self.run(INTRO_POLL_FRAMES)
+                if self.g.choosing(0) or self.g.choosing(2):
+                    return
+                if self._battle_pulse() != before:
+                    break
+            if self.g.controller_func(0) in INTRO_IDLE_FUNCS or self.g.controller_func(2) in INTRO_IDLE_FUNCS:
+                for _ in range(INTRO_PROMOTE_FRAMES // INTRO_POLL_FRAMES):
+                    self.run(INTRO_POLL_FRAMES)
+                    if self.g.choosing(0) or self.g.choosing(2):
+                        return
 
     def confirm_move(self, b: int, me) -> bool:
         """Confirm the move under b's cursor, or back out if it is spent. Returns True on a confirm.

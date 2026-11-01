@@ -287,6 +287,9 @@ PLAYER_CHOOSE_ACTION_FUNCS = frozenset({PLAYER_CHOOSE_ACTION, PLAYER_CHOOSE_ACTI
 # action grid and the Fight move list, so this is the only read that tells them apart: 0 or 2 on the
 # grid, 3 while the move list takes input (diffed across roxanne, battle_disabled, stall_route126)
 MOVE_LIST_COMM_STATE = 3
+# gBattleCommunication sub-state while the selection script runs (the no-PP / ineffective-move box).
+# The controller bounces to idle 0x83aa958 here, so choosing() reads False and only B leaves it.
+SELECTION_SCRIPT_COMM_STATE = 6
 FIELD_LOCKED = 0x03004C94      # 1 while an NPC script holds the player (its text box up), 0 on the free field;
                                # gMain.callback2 reads overworld either way, so this tells the two apart
 # shop.c sMartInfo: the open Mart's item list, a ROM pointer to a 0-terminated u16 id array, and

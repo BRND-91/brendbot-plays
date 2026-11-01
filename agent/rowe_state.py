@@ -396,12 +396,20 @@ class GameState:
         battler that is actually choosing rather than battler 0."""
         return self.controller_func(battler) in S.PLAYER_CHOOSE_ACTION_FUNCS
 
+    def comm(self, battler: int = 0) -> int:
+        """gBattleCommunication[battler], the sub-state behind the shared choose func: 0 or 2 on the
+        action grid, 3 while the Fight move list takes input, 6 while the selection script runs."""
+        return self.e.read(S.addr("gBattleCommunication") + battler, 1)[0]
+
     def in_move_list(self, battler: int) -> bool:
-        """True while the Fight move list takes input for a player battler. The action func
-        0x83c12bc drives the move list too, so choosing() reads True on both screens; the move list
-        is the sub-state gBattleCommunication[0] == MOVE_LIST_COMM_STATE (0 or 2 on the action grid)."""
-        return self.controller_func(battler) in S.PLAYER_CHOOSE_ACTION_FUNCS \
-            and self.e.read(S.addr("gBattleCommunication"), 1)[0] == S.MOVE_LIST_COMM_STATE
+        """True while the Fight move list takes input. Keyed on gBattleCommunication alone: the
+        controller bounces to idle 0x83aa958 under the list when the ROM refuses a 0-PP slot, so a
+        func-gated read missed that state and the intro branch mashed A into the parked move."""
+        return self.comm(battler) == S.MOVE_LIST_COMM_STATE
+
+    def in_selection_script(self, battler: int) -> bool:
+        """True while the selection script box is up (no PP, ineffective move). Only B leaves it."""
+        return self.comm(battler) == S.SELECTION_SCRIPT_COMM_STATE
 
     def disabled_move(self, battler: int) -> int:
         """Move id Disable has locked out for this battler, 0 when nothing is disabled."""
