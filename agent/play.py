@@ -222,6 +222,11 @@ INTRO_IDLE_FUNCS = frozenset({0x083AA958, 0x083AA964, 0x083AA968})
 INTRO_STEP_FRAMES = 180     # frames to let one intro text box clear after an A before the next press
 INTRO_PROMOTE_FRAMES = 300  # frames to wait at the post-intro idle for the action menu to open, no press
 INTRO_PRESSES = 8           # A presses one battle_step spends advancing an intro before it yields
+# one frame of hold is a press edge to the ROM's newKeys read; the release frames give the next
+# press a fresh edge. The old 8+12 spent 20 frames (333 ms at the stream's real-time clock) per key
+TAP_HOLD = 2
+TAP_GAP = 3
+MENU_POLL_FRAMES = 2        # poll step for menu waits that gate on a RAM readback instead of a fixed run()
 INTRO_POLL_FRAMES = 5       # frames per poll while waiting on the engine; the press fires the poll after the
                             # controller moves, so a tighter poll shortens the gap without pressing early
 
@@ -684,9 +689,28 @@ class Player:
             self.s.push(self.e.screen)
         core._core.setKeys(core._core, 0)
 
-    def tap(self, keys: int, hold: int = 8, gap: int = 12) -> None:
+    def tap(self, keys: int, hold: int = TAP_HOLD, gap: int = TAP_GAP) -> None:
         self.run(hold, keys)
         self.run(gap)
+
+    def wait_until(self, pred, max_frames: int, poll: int = MENU_POLL_FRAMES) -> bool:
+        """Run frames until pred() holds or max_frames pass; returns pred(). Replaces a fixed
+        run(N) after a press, so the next input fires the frame the menu is ready, not N later."""
+        for _ in range(0, max_frames, poll):
+            if pred():
+                return True
+            self.run(poll)
+        return pred()
+
+    def press_until(self, key: int, pred, timeout: int = 30, tries: int = 3) -> bool:
+        """Tap key until pred() holds, re-pressing only when the readback shows the press was eaten."""
+        for _ in range(tries):
+            if pred():
+                return True
+            self.tap(key)
+            if self.wait_until(pred, timeout):
+                return True
+        return False
 
     def _reach_fight(self, b: int) -> bool:
         """Steer the action cursor to Fight (slot 0). Returns True once it lands on Fight or the
@@ -831,31 +855,10 @@ class Player:
             self.tap(eb.KEY_B)
 
     def steer_move_cursor(self, battler: int, target: int) -> None:
-        """Land the move cursor on `target` in the Fight list. The caller's A to open Fight is
-        eaten while the "What will X do?" text draws, leaving the action grid live; there a bare
-        steer tap moves Fight->Pokemon and the confirming A opens the party menu, which wedges the
-        battle on the parked 0-PP lead move. A vertical probe drives gMoveSelectionCursor once the
-        list is open and gActionSelectionCursor while the grid still holds, so open Fight until the
-        probe moves the move cursor, then hop toward target reading it back so a dropped tap retries."""
-        for _ in range(MOVE_OPEN_RETRIES):
-            mc, ac = self.g.move_cursor(battler), self.g.action_cursor(battler)
-            self.tap(eb.KEY_DOWN)
-            self.run(8)
-            if self.g.move_cursor(battler) != mc:
-                # the list is open and the probe moved the move cursor; undo it and steer below
-                self.tap(eb.KEY_UP)
-                break
-            if self.g.action_cursor(battler) != ac:
-                # still on the action grid; the probe moved Fight->Pokemon, so undo and A opens Fight
-                self.tap(eb.KEY_UP)
-                self.tap(eb.KEY_A)
-                self.run(40)
-                continue
-            # neither cursor moved: the menu is mid-draw and this tap was eaten. a blind A here
-            # confirms whatever the open list defaults to, the spent lead move (Pawmot's 0-PP
-            # Supercell Slam), and confirming a 0-PP move in a double wedges the controller at
-            # 0x83aa958 with no recovery. settle and re-probe instead of pressing A.
-            self.run(40)
+        """Land the move cursor on `target` in the Fight list. The caller only gets here once b's
+        controller has left the action-choose func, so the list is open and a steer tap cannot move
+        Fight->Pokemon on a still-live grid; each hop reads the cursor back so a tap the list eats
+        while it draws is retried instead of waited out."""
         for _ in range(MOVE_STEER_RETRIES):
             cur = self.g.move_cursor(battler)
             if cur == target:
@@ -863,10 +866,12 @@ class Player:
             cx, cy = MOVE_GRID[cur & 3]
             tx, ty = MOVE_GRID[target]
             if tx != cx:
-                self.tap(eb.KEY_RIGHT if tx > cx else eb.KEY_LEFT)
-            elif ty != cy:
-                self.tap(eb.KEY_DOWN if ty > cy else eb.KEY_UP)
-            self.run(10)
+                key = eb.KEY_RIGHT if tx > cx else eb.KEY_LEFT
+            else:
+                key = eb.KEY_DOWN if ty > cy else eb.KEY_UP
+            # a tap eaten while the list draws leaves the cursor put; the readback retries it
+            self.tap(key)
+            self.wait_until(lambda: self.g.move_cursor(battler) != cur, 12)
 
     def _battle_pulse(self) -> tuple:
         """State that moves whenever the engine advances a text box or hands off control: the four
@@ -1107,26 +1112,36 @@ class Player:
                 return
             print(f"  switch budget spent on {me.nickname}, fighting instead", flush=True)
             plan = None
-        self.tap(eb.KEY_A)
-        self.run(40)
+        # A on Fight moves b's controller off the action-choose func into the move list; gate the
+        # steer on that instead of run(40) + a DOWN/UP probe. A press eaten while "What will X do?"
+        # draws leaves b choosing, so the A repeats; the cursor is already on Fight (_reach_fight)
+        if not self.press_until(eb.KEY_A, lambda: not self.g.choosing(b) or not self.g.in_battle(),
+                                timeout=30, tries=MOVE_OPEN_RETRIES):
+            return
         if not self.g.in_battle():
             return
         self.steer_move_cursor(b, plan[1] if plan is not None else self.pick_move(me, foes))
+        self.confirm_move(b, me)
+
+    def confirm_move(self, b: int, me) -> bool:
+        """Confirm the move under b's cursor, or back out if it is spent. Returns True on a confirm.
+        The only A pressed inside the Fight list: a dropped steer tap that leaves the cursor on a
+        0-PP slot must never reach it, since the ROM rejects the move w/ "no PP left" and deadlocks
+        the menu (the 0x83aa958 / 0x84f4c78 wedge). B backs out to the grid and the next step re-steers."""
         landed = self.g.move_cursor(b)
-        if not me.pp[landed]:
-            # a dropped steer tap left the cursor on a spent slot; confirming it makes the ROM
-            # reject it with "no PP left" and deadlock the move menu (the 0x83aa958 / 0x84f4c78
-            # wedge), so back out to the action grid and let the next step re-steer
+        if not me.pp[landed & 3]:
             self.tap(eb.KEY_B)
             self.run(20)
-            return
+            return False
         self.tap(eb.KEY_A)
         self.run(30)
         if self.g.battle_type_flags() & BATTLE_TYPE_DOUBLE and self.g.chooser() == b:
             # a double battle always asks which foe to hit, even after one foe faints, so key
             # off the battle type and not the live-foe count; A locks the default target
             self.tap(eb.KEY_A)
-        self.run(120)
+            self.run(30)
+        # no 120-frame tail: the turn plays out under the next battle_step's pulse-gated wait
+        return True
 
     def _open_wild_switch(self, slot: int) -> None:
         """Open the party menu on bench `slot` from a wild battle's action grid: Pokémon sits
@@ -2514,10 +2529,11 @@ class Player:
                 pos = self.g.position()
                 ow_stall = ow_stall + 1 if pos == last_ow else 0
                 last_ow = pos
-                if ow_stall in (2, 4):
+                if 1 <= ow_stall <= 5:
                     # a forced text box (a trainer's challenge or defeat line, an NPC) stalls
                     # movement with in_battle false; B advances it toward the battle or frees
-                    # the tile
+                    # the tile, firing on each stalled step so a multi-box dialogue clears at
+                    # reading speed instead of waiting out the counter
                     self.tap(eb.KEY_B)
                     if self.g.in_battle():
                         continue

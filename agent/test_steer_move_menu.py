@@ -1,7 +1,9 @@
 """steer_move_cursor must never press A while the Fight list is open on a spent slot. The list
 defaults the cursor to slot 0, and on Pawmot that slot is a 0-PP Supercell Slam; confirming it in a
 double battle wedges the player's controller at 0x83aa958 with no input able to recover (the frozen
-Golbat+Lunatone double on map [24, 0]). A dropped open-probe tap used to fall through to a blind A."""
+Golbat+Lunatone double on map [24, 0]). A dropped open-probe tap used to fall through to a blind A. Steer no longer presses A at all, so the
+no-A assertions here only pin that it stays that way; the wedge itself is pinned at the confirm, in
+test_confirm_move.py."""
 import emu_boot as eb
 import play
 
@@ -29,6 +31,8 @@ class FakePlayer:
 
     def run(self, frames, keys=0):
         pass
+
+    wait_until = play.Player.wait_until
 
     def tap(self, key, *a, **k):
         self.taps.append(key)
