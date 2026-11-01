@@ -233,6 +233,7 @@ MOVE_GRID = {0: (0, 0), 1: (1, 0), 2: (0, 1), 3: (1, 1)}
 ACT_NAV_RETRIES = 6
 MOVE_OPEN_RETRIES = 4   # A presses to open the Fight list; the first is eaten while the "What will X do?" text draws
 MOVE_STEER_RETRIES = 6  # hops to land the move cursor, re-read each step so a dropped tap retries
+PARTY_MENU_WALK_RETRIES = 3  # walks to settle the party cursor on the live target before A; a stale slot read re-walks
 # a battler's controller holds one of these idle funcs after its intro text ("X appeared!", "Go! X!")
 # and before its action menu opens, one value per battler slot. battler 0 at 0x83AA958 is the player
 # lead's post-intro idle. pressing A again here instead of waiting for the engine to open the menu
@@ -1285,20 +1286,31 @@ class Player:
         # a double battle lays the menu out as one list, both fielded mons then the bench, so
         # UP and DOWN step the slot by one and LEFT and RIGHT change nothing
         double = bool(self.g.battle_type_flags() & BATTLE_TYPE_DOUBLE)
-        for _ in range(10):
-            cur = self.g.party_menu_slot()
-            if cur == target:
+        # gPartyMenuSlot updates a few frames behind the dpad press under the cursor's slide, so a
+        # fixed run() after a tap can read the slot the cursor is leaving instead of the one it
+        # reaches, and an A fired on that read confirms whatever slot the cursor actually settled
+        # on, a fainted one costing a "no energy left" box, a B and a step. Poll the slot off its
+        # pre-tap value after every tap, and confirm only a live slot that is the target, re-walking
+        # from wherever the cursor really sits otherwise.
+        for _ in range(PARTY_MENU_WALK_RETRIES):
+            for _ in range(10):
+                cur = self.g.party_menu_slot()
+                if cur == target:
+                    break
+                if cur > 5:
+                    key = eb.KEY_DOWN  # Cancel wraps to slot 0
+                elif not double and cur % 2 != target % 2:
+                    key = eb.KEY_RIGHT if target % 2 else eb.KEY_LEFT
+                else:
+                    key = eb.KEY_DOWN if target > cur else eb.KEY_UP
+                self.tap(key)
+                self.wait_until(lambda c=cur: self.g.party_menu_slot() != c, 30)
+            landed = self.g.party_menu_slot()
+            if landed == target and party[landed].hp > 0:
                 break
-            if cur > 5:
-                key = eb.KEY_DOWN  # Cancel wraps to slot 0
-            elif not double and cur % 2 != target % 2:
-                key = eb.KEY_RIGHT if target % 2 else eb.KEY_LEFT
-            else:
-                key = eb.KEY_DOWN if target > cur else eb.KEY_UP
-            self.tap(key)
-            self.run(10)
-        if self.g.party_menu_slot() != target:
-            # a message box ("no energy left to battle!") ate the presses; B closes it and a
+        else:
+            # the cursor never settled on the live target: a message box ("no energy left to
+            # battle!") ate the presses, or the slot read never caught the walk. B closes a box; a
             # forced switch ignores a B with no box up
             self.tap(eb.KEY_B)
             self.run(30)
