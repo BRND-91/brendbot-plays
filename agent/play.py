@@ -35,6 +35,20 @@ from rowe_state import GameState  # noqa: E402
 from stream_sink import FrameStreamer  # noqa: E402
 
 
+_ROM_SHA = None
+
+
+def rom_sha() -> str:
+    """sha256 of the ROM on disk, computed once; the live page compares it against the
+    rom_sha stamped in species.json and refuses to render on a mismatch."""
+    global _ROM_SHA
+    if _ROM_SHA is None:
+        import hashlib
+        with open(eb.ROM, "rb") as f:
+            _ROM_SHA = hashlib.sha256(f.read()).hexdigest()
+    return _ROM_SHA
+
+
 class StopRequested(Exception):
     """Raised from run() once a stop signal arrived, so any nested walk or battle unwinds."""
 
@@ -1391,6 +1405,7 @@ class Player:
             "box": m.box, "slot": m.position, "species": m.species, "name": m.nickname,
             "level": rowe_rom.level_from_exp(m.species, m.experience), "shiny": m.shiny,
         } for m in self.g.boxes() if m.species < rowe_rom.SPECIES_COUNT]
+        dex_owned, dex_seen = self.g.pokedex()
         status = {
             "ts": time.time(), "pid": os.getpid(), "goal": self.goal,
             "map": [group, num], "tile": [x, y], "party": party, "boxes": boxes, "field_moves": sorted(self.field_moves()),
@@ -1398,6 +1413,7 @@ class Player:
             "badges": self.g.badges(),
             "badge_flags": [self.g.flag(S.FLAG_BADGE01 + i) for i in range(S.BADGE_COUNT)],
             "caught_species": sorted(self.ledger.caught),
+            "dex_owned": dex_owned, "dex_seen": dex_seen, "rom_sha": rom_sha(),
             "wanted_types": sorted(rowe_rom.TYPE_NAMES[t] for t in self.wanted),
             "battles": self.battles, "wins": self.wins, "caught": self.caught,
             "events": list(self.events), "event_seq": self.event_seq, "exit_reason": self.exit_reason,
@@ -1796,10 +1812,15 @@ class Player:
                 break
         else:
             if hop in rowe_rom.dive_script_edges().get(here, set()):
-                # here is underwater and hop is where its setdivewarp surfaces (Sootopolis from
-                # (24, 5)), a link the ROM connection table never carries, so this is an emerge
-                status = self.errands.take_dive(rowe_map.DIR_EMERGE, surf=surf, tools=self.field_moves())
-                how = "emerge"
+                # here and hop are linked by a setdivewarp the ROM connection table never carries
+                # (Sootopolis (0,7) <-> underwater (24,5)). Surfacing from the seabed emerges on a B
+                # press; diving in from the surface submerges on an A press over deep water.
+                if rowe_rom.is_underwater(*here):
+                    status = self.errands.take_dive(rowe_map.DIR_EMERGE, surf=surf, tools=self.field_moves())
+                    how = "emerge"
+                else:
+                    status = self.errands.take_dive(rowe_map.DIR_DIVE, surf=surf, tools=self.field_moves())
+                    how = "dive"
             else:
                 warp_rank = None
                 if lr is not None:

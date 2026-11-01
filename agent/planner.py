@@ -49,9 +49,10 @@ def grind_map(graph: map_graph.MapGraph, blocked: frozenset, anchor: tuple, cap:
     then by the ROM's land wild level, highest under the cap first. Anchoring on the gym rather
     than the executor's tile keeps a restock detour in a starter town from dragging the grind
     back to Route 101, and the wild-level tiebreak fights the strongest grass on the way forward.
-    A group-0 map numbered 16 or above holds grass; `blocked` is grass the executor could not
-    reach, skipped while another remains."""
-    routes = {m for m in graph.visited if m[0] == 0 and m[1] >= 16}
+    A group-0 map numbered 16 or above holds grass, except a MAP_TYPE_UNDERWATER seabed, which
+    holds none and travel_toward cannot route to, so it is filtered out. `blocked` is grass the
+    executor could not reach, skipped while another remains."""
+    routes = {m for m in graph.visited if m[0] == 0 and m[1] >= 16 and not rowe_rom.is_underwater(*m)}
     routes = (routes - blocked) or routes
     hops = hops_from(tuple(anchor))
     if not routes:

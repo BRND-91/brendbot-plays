@@ -15,6 +15,7 @@ import os
 
 import emu_boot as eb
 import map_graph
+import planner
 import play
 import rowe_rom
 
@@ -53,3 +54,16 @@ def test_demote_sets_a_reachable_grind_target():
     target = tuple(p.goal["map"])
     assert target == HERE or p.graph.route(HERE, target, field_moves=moves) is not None, (
         f"demote_to_grind set grind target {target} that travel_toward cannot reach from {HERE}")
+
+
+def test_grind_map_skips_underwater_seabed():
+    # the endgame branch (planner.recommend, all gyms beaten) calls grind_map, which read every
+    # group-0 map numbered >=16 as grass. (0,51) is a MAP_TYPE_UNDERWATER pocket the party swam,
+    # so it passed that test, got picked, and travel_toward could not route to it, bouncing the
+    # supervisor. With the only visited group-0 map underwater the pre-filter pick was [0, 51]; the
+    # filter drops it so grind_map falls back to an overworld map instead.
+    assert rowe_rom.is_underwater(0, 51)
+    g = map_graph.MapGraph("/tmp/rowe-grind-map-underwater-test.json")
+    g.visited.add((0, 51))
+    pick = planner.grind_map(g, frozenset(), (8, 1), None)
+    assert not rowe_rom.is_underwater(*pick), f"grind_map picked underwater {pick}"
