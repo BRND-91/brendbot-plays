@@ -1,0 +1,17 @@
+# emulator build + vendored sources (build locally, see ARCHITECTURE.md)
+agent/mgba-build/
+agent/mgba-src/
+agent/mgba-dl/
+agent/mgba-stubs.so
+agent/vendor/
+# the ROM is copyrighted and ships with nobody
+*.gba
+*.sav
+*.srm
+# runtime state: save states, ledgers, status, map graph the live run rewrites
+agent/states/
+*.ss
+# python
+agent/.venv/
+__pycache__/
+*.pyc
