@@ -195,10 +195,17 @@ def recommend(status: dict, graph: map_graph.MapGraph) -> tuple:
         return {"mode": "grind", "map": grass, "cap": cap}, f"party {len(party)}/6, lowest attacker L{low} vs cap {cap}, grind {grass} toward {list(anchor)}"
     if not unbeaten:
         dest = (0, 8)  # Ever Grande City, the post-badge endgame target
-        if here != dest and graph.route(here, dest, field_moves=frozenset(status.get("field_moves", []))) is not None:
+        moves = frozenset(status.get("field_moves", []))
+        if here != dest and graph.route(here, dest, field_moves=moves) is not None:
             return {"mode": "travel", "to": list(dest)}, f"at cap {cap}, all Hoenn gyms beaten, travelling to Ever Grande {list(dest)}"
-        grass = grind_map(graph, blocked, anchor, None)
-        return {"mode": "grind", "map": grass, "cap": None}, f"at cap {cap}, all Hoenn gyms beaten, no route to {list(dest)}, holding on {grass}"
+        # arrival at Ever Grande, or no walkable route to it: explore toward dest, never grind. a
+        # grind here anchors the grass rank on an unreachable cell and walks the party back across
+        # Hoenn, and at badge 8 the party is over the cap so grinding earns nothing. the here != dest
+        # guard routes the arrival case (here == dest) here so a travel-to-self cannot loop. the
+        # reason names here, the moves it routed under, and the reachable-map count so a bad here (an
+        # interior map or a mid-warp write) reads in one line
+        hop = graph.route(here, dest, field_moves=frozenset())
+        return {"mode": "explore", "to": list(dest), "cap": None}, f"at cap {cap}, all Hoenn gyms beaten, here {list(here)}, no travel route to {list(dest)} under moves {sorted(moves)}, {len(hops)} maps reachable, hop {list(hop) if hop else None}, exploring toward {list(dest)}"
     if gym is None:
         target = min(unbeaten, key=lambda g: GYM_BADGE[g])
         return {"mode": "explore", "to": list(target), "cap": None}, f"at cap {cap}, no gym reachable over world edges, exploring toward {list(target)}"
