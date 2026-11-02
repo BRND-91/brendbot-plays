@@ -76,7 +76,6 @@ class BattleMon:
     status1: int
     stat_stages: tuple
     nickname: str
-    personality: int = 0
     atk: int = 0
     dfn: int = 0
     spd: int = 0
@@ -179,7 +178,6 @@ def battle_mon(raw: bytes, battler: int) -> BattleMon:
         status1=struct.unpack_from("<I", raw, S.BM_STATUS1)[0],
         stat_stages=tuple(raw[S.BM_STAT_STAGES:S.BM_STAT_STAGES + 8]),
         nickname=decode_text(raw[S.BM_NICKNAME:S.BM_NICKNAME + 10]),
-        personality=struct.unpack_from("<I", raw, S.BM_PERSONALITY)[0],
     )
 
 
@@ -332,19 +330,6 @@ class GameState:
         sb2 = self.e.u32(S.addr("gSaveBlock2Ptr"))
         return self.e.u32(sb1 + S.SB1_MONEY) ^ self.e.u32(sb2 + S.SB2_ENCRYPTION_KEY)
 
-    def pokedex(self) -> tuple:
-        """(owned, seen) national dex numbers read off SaveBlock1's dexCaught and dexSeen
-        bit arrays; bit n-1, national dex capped at NATIONAL_DEX_MAX. This is the in-game
-        Pokedex, not the executor's catch ledger."""
-        sb1 = self.e.u32(S.addr("gSaveBlock1Ptr"))
-        caught = self.e.read(sb1 + S.SB1_DEX_CAUGHT, S.DEX_FLAGS_NO)
-        seen = self.e.read(sb1 + S.SB1_DEX_SEEN, S.DEX_FLAGS_NO)
-
-        def ids(buf: bytes) -> list:
-            return [n for n in range(1, S.NATIONAL_DEX_MAX + 1)
-                    if buf[(n - 1) // 8] & (1 << ((n - 1) % 8))]
-        return ids(caught), ids(seen)
-
     def iv_boosts(self) -> tuple:
         """Every mon's IVs in stat order (HP, Atk, Def, Spe, SpA, SpD): the Trainer Skill stat-boost
         levels times SKILL_IV_PER_LEVEL. The skill rows run HP, Atk, Def, SpA, SpD, Spe."""
@@ -395,21 +380,6 @@ class GameState:
         mon chooses as battler 2 while battler 0 has gone idle at 0x83aa958, so a gate must read the
         battler that is actually choosing rather than battler 0."""
         return self.controller_func(battler) in S.PLAYER_CHOOSE_ACTION_FUNCS
-
-    def comm(self, battler: int = 0) -> int:
-        """gBattleCommunication[battler], the sub-state behind the shared choose func: 0 or 2 on the
-        action grid, 3 while the Fight move list takes input, 6 while the selection script runs."""
-        return self.e.read(S.addr("gBattleCommunication") + battler, 1)[0]
-
-    def in_move_list(self, battler: int) -> bool:
-        """True while the Fight move list takes input. Keyed on gBattleCommunication alone: the
-        controller bounces to idle 0x83aa958 under the list when the ROM refuses a 0-PP slot, so a
-        func-gated read missed that state and the intro branch mashed A into the parked move."""
-        return self.comm(battler) == S.MOVE_LIST_COMM_STATE
-
-    def in_selection_script(self, battler: int) -> bool:
-        """True while the selection script box is up (no PP, ineffective move). Only B leaves it."""
-        return self.comm(battler) == S.SELECTION_SCRIPT_COMM_STATE
 
     def disabled_move(self, battler: int) -> int:
         """Move id Disable has locked out for this battler, 0 when nothing is disabled."""

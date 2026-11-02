@@ -7,7 +7,7 @@ puzzle config on every map load. A breadth-first search over (tile, orientations
 edge one direction press on a loaded save state, finds the press sequence from the door mat to
 the leader's stand without modelling arm shapes or rotation rules.
 
-    probe_fortree_bfs.py  -> states/fixtures/fortree_route.json {"start": [x, y], "presses": [[dx, dy], ...]}
+    probe_fortree_bfs.py  -> states/probe/fortree_route.json {"start": [x, y], "presses": [[dx, dy], ...]}
 """
 import heapq
 import json
@@ -20,8 +20,8 @@ import rowe_symbols as S
 from nav import DIRS, GATE_SETTLE_FRAMES
 
 # --entry PATH swaps the start state, e.g. one saved on the door mat w/ the trainers beaten
-ENTRY = sys.argv[sys.argv.index("--entry") + 1] if "--entry" in sys.argv else "states/fixtures/fortree_entry.ss"
-OUT = "states/fixtures/fortree_route.json"
+ENTRY = sys.argv[sys.argv.index("--entry") + 1] if "--entry" in sys.argv else "states/probe/fortree_entry.ss"
+OUT = "states/probe/fortree_route.json"
 STAND = (15, 3)
 GYM = (12, 1)
 GATE_VARS = 0x1BCA  # SaveBlock1 offset of the 8 orientation bytes, found by their config values

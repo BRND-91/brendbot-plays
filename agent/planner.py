@@ -49,10 +49,9 @@ def grind_map(graph: map_graph.MapGraph, blocked: frozenset, anchor: tuple, cap:
     then by the ROM's land wild level, highest under the cap first. Anchoring on the gym rather
     than the executor's tile keeps a restock detour in a starter town from dragging the grind
     back to Route 101, and the wild-level tiebreak fights the strongest grass on the way forward.
-    A group-0 map numbered 16 or above holds grass, except a MAP_TYPE_UNDERWATER seabed, which
-    holds none and travel_toward cannot route to, so it is filtered out. `blocked` is grass the
-    executor could not reach, skipped while another remains."""
-    routes = {m for m in graph.visited if m[0] == 0 and m[1] >= 16 and not rowe_rom.is_underwater(*m)}
+    A group-0 map numbered 16 or above holds grass; `blocked` is grass the executor could not
+    reach, skipped while another remains."""
+    routes = {m for m in graph.visited if m[0] == 0 and m[1] >= 16}
     routes = (routes - blocked) or routes
     hops = hops_from(tuple(anchor))
     if not routes:
@@ -194,18 +193,8 @@ def recommend(status: dict, graph: map_graph.MapGraph) -> tuple:
         grass = grind_map(graph, blocked, anchor, cap)
         return {"mode": "grind", "map": grass, "cap": cap}, f"party {len(party)}/6, lowest attacker L{low} vs cap {cap}, grind {grass} toward {list(anchor)}"
     if not unbeaten:
-        dest = (0, 8)  # Ever Grande City, the post-badge endgame target
-        moves = frozenset(status.get("field_moves", []))
-        if here != dest and graph.route(here, dest, field_moves=moves) is not None:
-            return {"mode": "travel", "to": list(dest)}, f"at cap {cap}, all Hoenn gyms beaten, travelling to Ever Grande {list(dest)}"
-        # arrival at Ever Grande, or no walkable route to it: explore toward dest, never grind. a
-        # grind here anchors the grass rank on an unreachable cell and walks the party back across
-        # Hoenn, and at badge 8 the party is over the cap so grinding earns nothing. the here != dest
-        # guard routes the arrival case (here == dest) here so a travel-to-self cannot loop. the
-        # reason names here, the moves it routed under, and the reachable-map count so a bad here (an
-        # interior map or a mid-warp write) reads in one line
-        hop = graph.route(here, dest, field_moves=frozenset())
-        return {"mode": "explore", "to": list(dest), "cap": None}, f"at cap {cap}, all Hoenn gyms beaten, here {list(here)}, no travel route to {list(dest)} under moves {sorted(moves)}, {len(hops)} maps reachable, hop {list(hop) if hop else None}, exploring toward {list(dest)}"
+        grass = grind_map(graph, blocked, anchor, None)
+        return {"mode": "grind", "map": grass, "cap": None}, f"at cap {cap}, all Hoenn gyms beaten, holding on {grass}"
     if gym is None:
         target = min(unbeaten, key=lambda g: GYM_BADGE[g])
         return {"mode": "explore", "to": list(target), "cap": None}, f"at cap {cap}, no gym reachable over world edges, exploring toward {list(target)}"
@@ -227,7 +216,7 @@ def main() -> None:
         status = json.load(f)
     age = int(time.time() - status["ts"])
     lead = status["party"][0]
-    graph = map_graph.MapGraph(GRAPH, world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs())
+    graph = map_graph.MapGraph(GRAPH)
     goal, why = recommend(status, graph)
     current = json.load(open(GOAL)) if os.path.exists(GOAL) else None
     running = executor_running()

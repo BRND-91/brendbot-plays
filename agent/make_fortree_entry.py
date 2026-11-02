@@ -16,9 +16,9 @@ import play
 from nav import GATE_SETTLE_FRAMES
 
 GYM = (12, 1)
-SNAPSHOT = sys.argv[1] if len(sys.argv) > 1 else "states/fixtures/route101.ss"
-OUT = sys.argv[2] if len(sys.argv) > 2 else "states/fixtures/fortree_entry_beaten.ss"
-SRC = "states/fixtures/entry_src.ss"  # loop() reads goal.json and map_graph.json from this file's dir
+SNAPSHOT = sys.argv[1] if len(sys.argv) > 1 else "states/route101.ss"
+OUT = sys.argv[2] if len(sys.argv) > 2 else "states/probe/fortree_entry_beaten.ss"
+SRC = "states/probe/entry_src.ss"  # loop() reads goal.json and map_graph.json from this file's dir
 MAX_STEPS = 400
 
 

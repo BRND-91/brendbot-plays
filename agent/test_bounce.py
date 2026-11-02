@@ -15,15 +15,8 @@ class _Graph:
         return {(0, 35), (24, 108)}
 
 
-class _G:
-    @staticmethod
-    def position():
-        return (0, 0, 0, 35)  # only _after_cross's land-print reads it here
-
-
 def _player() -> Player:
     p = Player.__new__(Player)
-    p.g = _G()
     p.graph = _Graph()
     p.goal = {"mode": "grind"}  # the cycle guard counts only goal-directed modes, so it stays off here
     p._blocked, p._stuck, p._bounces = {}, {}, {}

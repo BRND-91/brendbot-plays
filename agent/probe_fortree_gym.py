@@ -3,7 +3,7 @@ what the live grid sees the moment challenge_leader reports the stand unreachabl
 
 The ROM layout w/ the trainers' tiles blocked still paths to Winona's stand (15, 3), so the
 live block is something the static read does not carry: a runtime object, a gate sprite, or a
-layout the game rewrote. The capture is the state file (states/fixtures/fortree_gym.ss), every
+layout the game rewrote. The capture is the state file (states/probe/fortree_gym.ss), every
 active object event w/ its raw header bytes, the grid's NPC-blocked tiles, and the path verdict,
 so the blocker is read from the capture instead of guessed.
 """
@@ -17,8 +17,8 @@ import play
 import rowe_symbols as S
 from nav import Grid
 
-LIVE = "states/fixtures"
-SCRATCH = "/tmp/rowe_probe"
+LIVE = "states"
+SCRATCH = "states/probe"
 GYM = (12, 1)
 STAND = (15, 3)
 BUDGET_S = 1500

@@ -9,8 +9,8 @@ from play import BATTLE_TYPE_DOUBLE, Player
 
 
 class Mon:
-    def __init__(self, slot: int, nickname: str, hp: int, personality: int = 0):
-        self.slot, self.nickname, self.hp, self.personality = slot, nickname, hp, personality
+    def __init__(self, slot: int, nickname: str, hp: int):
+        self.slot, self.nickname, self.hp = slot, nickname, hp
 
 
 class G:
@@ -40,13 +40,13 @@ class G:
 
 
 def test_double_menu_cursor_reaches_the_bench_slot():
-    party = [Mon(0, "Goldeen", 0, 10), Mon(1, "Greedent", 106, 11), Mon(2, "Flechinder", 103, 12),
-             Mon(3, "Mightyena", 106, 13), Mon(4, "Stoutland", 118, 14), Mon(5, "Gloom", 97, 15)]
-    battlers = [party[0], Mon(0, "Mothim", 27, 90), party[1], Mon(1, "Swoobat", 59, 91)]
+    party = [Mon(0, "Goldeen", 0), Mon(1, "Greedent", 106), Mon(2, "Flechinder", 103),
+             Mon(3, "Mightyena", 106), Mon(4, "Stoutland", 118), Mon(5, "Gloom", 97)]
+    battlers = [party[0], Mon(0, "Mothim", 27), party[1], Mon(1, "Swoobat", 59)]
     g = G(party, battlers, slot=1)
     p = Player.__new__(Player)
     p.g = g
-    p.switch_to = 14  # Stoutland's personality
+    p.switch_to = "Stoutland"
     picked = []
 
     def tap(key: int, hold: int = 8, gap: int = 12) -> None:

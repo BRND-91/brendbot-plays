@@ -31,9 +31,6 @@ def main() -> None:
     fd2, graph_path2 = tempfile.mkstemp(suffix=".json")
     os.close(fd2)
     os.remove(graph_path2)
-    fd3, graph_path3 = tempfile.mkstemp(suffix=".json")
-    os.close(fd3)
-    os.remove(graph_path3)
     closed_bak = planner.GYM_CLOSED + ".testbak"
     had_closed = os.path.exists(planner.GYM_CLOSED)
     if had_closed:
@@ -123,37 +120,9 @@ def main() -> None:
         assert reopened["mode"] == "gym" and reopened["map"] == [8, 1], reopened
         graph.gated.clear()
 
-        # a post-badge hold with no walkable route to Ever Grande (0,8) explores toward (0,8), never
-        # grind_map. a grind fallback here ranks grass by hops to the unreachable target and walks
-        # the party back across Hoenn (the live loop that swam it west), and at cap 45 the badge-8
-        # party is over the cap so a grind earns nothing. Gate every world edge into (0,8).
-        g5 = map_graph.MapGraph(graph_path3)
-        g5.visited.update({(0, 16), (0, 40)})
-        for p, ds in rowe_rom.world_edges().items():
-            if (0, 8) in ds:
-                g5.gated[(p, (0, 8))] = frozenset({"SURF"})
-        st = _status((0, 16), 8, set(range(8)), cap_level=45)
-        st["field_moves"] = ["SURF"]
-        st["goal"] = {"mode": "travel", "to": [0, 8]}
-        assert g5.route((0, 16), (0, 8), field_moves=frozenset({"SURF"})) is None, "test needs no route to (0,8)"
-        g5goal, g5why = planner.recommend(st, g5)
-        assert g5goal["mode"] == "explore" and g5goal["to"] == [0, 8], (g5goal, g5why)
-        assert g5goal["mode"] != "grind", "no grind fallback at badge 8, it walks the party across Hoenn"
-        # the reason carries here, the moves it routed under, and the reachable-map count, so a bad
-        # here (an interior map or a mid-warp write) is a one-line diagnosis
-        assert "[0, 16]" in g5why and "['SURF']" in g5why and "reachable" in g5why, g5why
-
-        # arrival at Ever Grande, here == dest == (0,8), hits the here != dest travel guard and must
-        # explore toward (0,8), never grind back west, whatever route returns for a self-hop
-        arr = _status((0, 8), 8, set(range(8)), cap_level=45)
-        arr["field_moves"] = ["SURF", "WATERFALL", "DIVE"]
-        arrgoal, arrwhy = planner.recommend(arr, g5)
-        assert arrgoal["mode"] == "explore" and arrgoal["to"] == [0, 8], (arrgoal, arrwhy)
-        assert arrgoal["mode"] != "grind", arrwhy
-
         print("test_planner OK")
     finally:
-        for gp in (graph_path, graph_path2, graph_path3):
+        for gp in (graph_path, graph_path2):
             if os.path.exists(gp):
                 os.remove(gp)
         if os.path.exists(planner.GYM_CLOSED):

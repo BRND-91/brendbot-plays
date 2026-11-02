@@ -4,7 +4,7 @@ component, and surfacing from the underwater maps lands on (0,34)/(0,126), never
 the entry is a coord-event or metatile-triggered warp the ROM tables do not encode. This drives a
 copy of the live save one hop east onto Route 127 (0,127), the Sootopolis-adjacent water, and
 steps every non-ordinary metatile there, logging each map change, to find the tile that fires the
-warp. Runs off states/fixtures so the live supervisor keeps its own files."""
+warp. Runs off states/probe so the live supervisor keeps its own files."""
 import json
 import os
 import shutil
@@ -18,7 +18,7 @@ import rowe_map
 import rowe_rom
 import rowe_symbols as S
 
-SCRATCH = "states/fixtures"
+SCRATCH = "states/probe"
 LOG = os.path.join(SCRATCH, "sootopolis_entry.jsonl")
 ORDINARY = {0x0} | set(range(0x10, 0x16))  # plain ground and surfable water, not a trigger
 BUDGET_S = 1200
@@ -28,8 +28,8 @@ MAX_WALKS = 400
 def main() -> None:
     os.makedirs(SCRATCH, exist_ok=True)
     state = os.path.join(SCRATCH, "entry_probe.ss")
-    shutil.copy("states/fixtures/route101.ss", state)
-    shutil.copy("states/fixtures/map_graph.json", os.path.join(SCRATCH, "map_graph.json"))
+    shutil.copy("states/route101.ss", state)
+    shutil.copy("states/map_graph.json", os.path.join(SCRATCH, "map_graph.json"))
 
     emu = eb.Emu()
     with open(state, "rb") as f:

@@ -27,7 +27,7 @@ while [ $((end - SECONDS)) -gt 120 ]; do
     child=0
     reason=$(.venv/bin/python -c "import json; print(json.load(open('states/status.json'))['exit_reason'])" 2>/dev/null)
     case "$reason" in
-        unsupported*) echo "supervisor: executor needs a decision ($reason)"; exit 0 ;;
+        unsupported*) echo "supervisor: executor needs a decision ($reason)"; /opt/brendbot/scripts/send-discord "1497841038323220651" "rowe grind halted: $reason"; exit 0 ;;
     esac
     # stop a map that re-exits identically: 3 runs ending with the same reason at the same map+tile
     # means the planner keeps re-entering a dead spot, so post the reason and position and stop

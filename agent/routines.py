@@ -23,11 +23,8 @@ JACK_STAND = (4, 4)          # two below the blue nurse at (4, 2) on that layout
 MOVE_UP, MOVE_DOWN = (0, -1), (0, 1)
 # stand tile offset from the ball -> the key that faces the ball from that side
 STAND_FACING = {(0, 1): eb.KEY_UP, (0, -1): eb.KEY_DOWN, (1, 0): eb.KEY_LEFT, (-1, 0): eb.KEY_RIGHT}
-# pokeemerald MB_*_ARROW_WARP behaviors -> the press that fires the warp from the tile itself.
-# 0x6d is MB_WATER_SOUTH_ARROW_WARP, the dive-tunnel current linking underwater maps (Sootopolis
-# (24,5) tile (9,8) -> (0,51)); it fires on a south press, same as the land south arrow 0x65.
-ARROW_WARP_KEYS = {0x62: eb.KEY_RIGHT, 0x63: eb.KEY_LEFT, 0x64: eb.KEY_UP, 0x65: eb.KEY_DOWN,
-                   0x6d: eb.KEY_DOWN}
+# pokeemerald MB_*_ARROW_WARP behaviors -> the press that fires the warp from the tile itself
+ARROW_WARP_KEYS = {0x62: eb.KEY_RIGHT, 0x63: eb.KEY_LEFT, 0x64: eb.KEY_UP, 0x65: eb.KEY_DOWN}
 
 
 def route_state_matches(live: tuple, recorded: tuple) -> bool:
@@ -113,25 +110,25 @@ class Errands:
         "Would you like to Dive?" prompt, and read the warp. "map_changed", "battle", "stuck", or
         "unreachable".
 
-        DIR_EMERGE surfaces from an underwater map through a yes/no dialogue: B opens "Would you
-        like to surface?", A answers YES on the default cursor, then the warp follows the map's
-        EMERGE connection or its setdivewarp point. emerge_tiles drops the back-warp tile and the
-        two no-surfacing behaviors, nearest first, until one tile warps."""
+        DIR_EMERGE surfaces from an underwater map: pressedBButton runs the emerge script, which
+        warps to the surface point this map's setdivewarp set (Sootopolis, from (24, 5)). Most open
+        tiles emerge; a few under land refuse, so the current tile then the nearest reachable ones
+        are tried until the map changes."""
         if direction == rowe_map.DIR_EMERGE:
             before = self.map_id()
             grid = Grid(self.e)
             grid.tools = tools
             x, y, *_ = self.g.position()
-            for tile in grid.emerge_tiles((x, y), surf)[:13]:
+            nearby = sorted((t for t in grid.reachable((x, y), surf) if t != (x, y)),
+                            key=lambda t: abs(t[0] - x) + abs(t[1] - y))
+            for tile in [(x, y)] + nearby[:12]:  # 12 fallbacks past the entry tile, for an unable-to-emerge spot
                 if tile != (x, y):
                     r = self.nav.walk_to(tile, surf=surf, tools=tools)
                     if r == "battle":
                         return r
                     if r != "arrived":
                         continue
-                self.run(24, eb.KEY_B)   # "Would you like to surface?" yes/no, cursor on YES
-                self.run(60, 0)          # the surface prompt is two lines; A before it finishes
-                self.run(24, eb.KEY_A)   # opening advances the text instead of selecting YES
+                self.run(24, eb.KEY_B)
                 self.run(120, 0)
                 if self._landed(before):
                     return "map_changed"
@@ -263,7 +260,6 @@ class Errands:
         """A door takes an UP press from the tile below; a floor warp (cave mouth, exit mat,
         stairs) fires on arrival or on a step into it from whichever side is open."""
         before = self.map_id()
-        underwater = rowe_rom.is_underwater(*before)
         grid = Grid(self.e)
         grid.tools = tools
         x, y, *_ = self.g.position()
@@ -280,11 +276,8 @@ class Errands:
                     return r
                 if r != "arrived":
                     return "stuck"
-            if not underwater:
-                # B closes a greeting that ate the press; on the seabed it fires the emerge
-                # script and surfaces the party off the warp, so skip it underwater
-                self.run(8, eb.KEY_B)
-                self.run(16, 0)
+            self.run(8, eb.KEY_B)
+            self.run(16, 0)
             self.run(24, arrow)
             self.run(120, 0)
             return "map_changed" if self._landed(before) else "stuck"
@@ -316,13 +309,12 @@ class Errands:
             # a greeting that opened on arrival (Slateport's museum guide) eats the first
             # press; B closes it and the same press then fires the warp
             if key:
-                if not underwater:
-                    self.run(8, eb.KEY_B)
-                    self.run(16, 0)
-                    self.run(24, key)
-                    self.run(120, 0)
-                    if self._landed(before):
-                        return "map_changed"
+                self.run(8, eb.KEY_B)
+                self.run(16, 0)
+                self.run(24, key)
+                self.run(120, 0)
+                if self._landed(before):
+                    return "map_changed"
             elif self._press_off_edge(w, w_max, h_max, before):
                 return "map_changed"
         return "stuck"
@@ -331,14 +323,11 @@ class Errands:
         """On an exit mat, which fires on the press off the map edge (a bottom-row door mat
         takes DOWN) and stays quiet when walked onto sideways. B first closes a greeting that
         opened on arrival (Slateport's museum guide), since it eats the press otherwise."""
-        underwater = rowe_rom.is_underwater(*before)
         for dx, dy, key in ((0, 1, eb.KEY_DOWN), (0, -1, eb.KEY_UP), (-1, 0, eb.KEY_LEFT), (1, 0, eb.KEY_RIGHT)):
             if 0 <= w.x + dx < w_max and 0 <= w.y + dy < h_max:
                 continue
-            if not underwater:
-                # B underwater emerges instead of closing a greeting, so skip it on the seabed
-                self.run(8, eb.KEY_B)
-                self.run(16, 0)
+            self.run(8, eb.KEY_B)
+            self.run(16, 0)
             self.run(24, key)
             self.run(120, 0)
             if self._landed(before):

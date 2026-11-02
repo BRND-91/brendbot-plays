@@ -39,8 +39,6 @@ def catch_chance(foe: BattleMon, ball_mult: float = 1.0) -> float:
         odds *= 2
     elif foe.status1:
         odds *= 1.5
-    if odds <= 0:
-        return 0.0
     if odds >= 255:
         return 1.0
     shake = 1048560 / (16711680 / odds) ** 0.25
@@ -64,7 +62,7 @@ def status_move_slot(user: BattleMon, foe: BattleMon) -> int | None:
 def helper_slot(party, active: BattleMon, foe: BattleMon) -> int | None:
     """Bench slot worth switching in to set up a catch: a mon w/ a usable status move first,
     else one whose lightest hit leaves the foe standing. None when the bench has neither."""
-    bench = [m for m in party if m.hp > 0 and m.personality != active.personality]
+    bench = [m for m in party if m.hp > 0 and m.nickname != active.nickname]
     for m in bench:
         if status_move_slot(as_battler(m), foe) is not None:
             return m.slot
@@ -93,7 +91,5 @@ class Ledger:
 
     def record(self, species: int) -> None:
         self.caught.add(species)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w") as f:
+        with open(self.path, "w") as f:
             json.dump(sorted(self.caught), f)
-        os.replace(tmp, self.path)

@@ -2217,9 +2217,14 @@ class Player:
         hop = self.graph.explore_hop(here, self._blocked_from(region), moves)
         if hop is None:
             if self.graph.frontier_exhausted(moves) or self.graph.gated_frontier(moves):
-                # no open border left to walk: try a dive off the cluster first, then fall back
-                # to a wild-battle grind here rather than idling against a gate the walk cannot open
+                # no open border left to walk: try a dive off the cluster first. below 8 badges a
+                # gated frontier falls to a wild-battle grind rather than idling against a gate the
+                # walk cannot open. at 8 badges there is no gym left and the party is over cap 45, so
+                # a gated frontier means the endgame route out is blocked and a grind earns nothing,
+                # so halt on an unsupported reason the supervisor stops on instead of the walk back west
                 if not self._dive_frontier(region, moves):
+                    if self.g.badges() >= 8:
+                        raise GoalExit(f"unsupported: endgame blocked at {list(here)}, no reachable frontier past the last badge")
                     self.demote_to_grind(here)
             else:
                 # only this run's borders are blocked: an NPC in a doorway clears in a tick, a pocket

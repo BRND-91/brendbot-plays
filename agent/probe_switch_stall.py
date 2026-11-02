@@ -16,7 +16,7 @@ import play
 import rowe_symbols as S
 from emu_boot import Emu
 
-STATE = "states/fixtures/route101.ss"
+STATE = "states/route101.ss"
 
 
 def main(minutes: float) -> None:

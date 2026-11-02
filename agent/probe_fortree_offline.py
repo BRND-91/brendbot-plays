@@ -8,7 +8,7 @@ rotation-info tables say, when every arm's sweep tile is passable (RotatingGate_
 and otherwise the step is refused. Object events are walls, since a trainer stands still.
 
     probe_fortree_offline.py  -> prints the press route door -> stand, and writes it as
-    states/fixtures/fortree_route.json {"start": [x, y], "presses": [[dx, dy], ...]} for
+    states/probe/fortree_route.json {"start": [x, y], "presses": [[dx, dy], ...]} for
     probe_fortree_bfs.py --replay to run in the emulator and fill in the states.
 """
 import json
@@ -21,7 +21,7 @@ import rowe_symbols as S
 GYM = (12, 1)
 START = (15, 24)
 STAND = (15, 3)
-OUT = "states/fixtures/fortree_route.json"
+OUT = "states/probe/fortree_route.json"
 # (x, y, shape, orientation) in config order; the SaveBlock1 byte i is gate i's orientation
 L1, L2, L3, L4, T1, T2, T3, T4 = range(8)
 CONFIG = [(6, 7, T2, 1), (9, 15, T2, 2), (3, 19, T2, 1), (2, 6, T1, 1),

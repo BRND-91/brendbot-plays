@@ -11,8 +11,8 @@ import sys
 import emu_boot as eb
 import play
 
-LIVE = "states/fixtures"
-SCRATCH = "/tmp/rowe_probe"
+LIVE = "states"
+SCRATCH = "states/probe"
 
 
 def main() -> None:

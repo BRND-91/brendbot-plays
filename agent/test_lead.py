@@ -1,5 +1,4 @@
-"""lowest_lead: a lead at the grind cap hands the slot to any attacker under it inside LEAD_GAP,
-and a party with no attacking PP left treks to the Center instead of leading into grass PP-spent."""
+"""lowest_lead: a lead at the grind cap hands the slot to any attacker under it, inside LEAD_GAP."""
 import os
 import sys
 
@@ -11,10 +10,10 @@ ATK = next(mid for mid in range(1, 600) if rowe_rom.move(mid).power >= 10)
 
 
 class Mon:
-    def __init__(self, slot: int, level: int, hp: int = 80, max_hp: int = 80, can_hit: bool = True):
+    def __init__(self, slot: int, level: int, hp: int = 80, max_hp: int = 80):
         self.slot, self.level, self.hp, self.max_hp = slot, level, hp, max_hp
         self.moves = [ATK]
-        self.pp = [10] if can_hit else [0]
+        self.pp = [10]
 
 
 class G:
@@ -49,11 +48,6 @@ def main() -> None:
     assert p.lowest_lead() is None and p.need_heal is True, "cap lead over hurt grinders heals"
     p = player(stalled, {"mode": "grind", "cap": None})
     assert p.lowest_lead() is None and p.need_heal is False, "hold-grind keeps the gap rule for heals"
-    # full HP but no attacking PP anywhere: rotation cannot save it, so the overworld routes to the
-    # Center exactly as a fainted lead does, which keeps a PP-spent snapshot out of the next encounter
-    spent = [Mon(0, 29, can_hit=False), Mon(1, 29, can_hit=False), Mon(2, 29, can_hit=False)]
-    p = player(spent, {"mode": "grind", "cap": 29})
-    assert p.lowest_lead() is None and p.need_heal is True, "party out of PP treks to the Center"
     print("ok")
 
 

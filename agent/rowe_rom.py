@@ -78,7 +78,6 @@ MAPHDR_MUSIC = 0x10
 MAPHDR_LAYOUT_ID = 0x12
 MAPHDR_MAP_TYPE = 0x17
 MAP_TYPE_UNDERWATER = 5
-MAP_TYPE_INDOOR = 8
 MAP_SCRIPT_SCAN_CAP = 64  # map-script table entries, terminated by a 0 type byte; cap guards a garbage header pointer
 GYM_MUSIC = 0x14F  # every gym interior shares this track; the eight entrance maps plus a few inner floors
 OBJ_STRIDE = 24
@@ -545,13 +544,6 @@ def is_underwater(group: int, num: int) -> bool:
     rather than surf-only water nav must mount onto."""
     h = map_header(group, num)
     return h is not None and _rom()[h + MAPHDR_MAP_TYPE] == MAP_TYPE_UNDERWATER
-
-
-def is_indoor(group: int, num: int) -> bool:
-    """A MAP_TYPE_INDOOR map: a gym floor or building interior, the inside of a place rather than
-    the town it exits to."""
-    h = map_header(group, num)
-    return h is not None and _rom()[h + MAPHDR_MAP_TYPE] == MAP_TYPE_INDOOR
 
 
 @lru_cache(maxsize=1)
