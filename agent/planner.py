@@ -38,6 +38,10 @@ GYM_STAND = {(11, 3): (5, 3), (4, 1): (13, 10)}
 GYM_CLOSED = os.path.join(STATES, "gym_closed.json")
 PARTY_SIZE = 6
 
+# post-badge endgame travel order: Ever Grande City, the Victory Road entry hall reached by the
+# city waterfall, the League-side hall, then the Pokemon League where the Elite Four sequence begins
+ENDGAME_CHAIN = [(0, 8), (16, 12), (16, 10), (25, 60)]
+
 
 def executor_running() -> bool:
     out = subprocess.run(["pgrep", "-f", "play.py --state"], capture_output=True, text=True)
@@ -49,9 +53,10 @@ def grind_map(graph: map_graph.MapGraph, blocked: frozenset, anchor: tuple, cap:
     then by the ROM's land wild level, highest under the cap first. Anchoring on the gym rather
     than the executor's tile keeps a restock detour in a starter town from dragging the grind
     back to Route 101, and the wild-level tiebreak fights the strongest grass on the way forward.
-    A group-0 map numbered 16 or above holds grass; `blocked` is grass the executor could not
-    reach, skipped while another remains."""
-    routes = {m for m in graph.visited if m[0] == 0 and m[1] >= 16}
+    A group-0 map numbered 16 or above holds grass, except a MAP_TYPE_UNDERWATER seabed, which
+    holds none and travel_toward cannot route to, so it is filtered out. `blocked` is grass the
+    executor could not reach, skipped while another remains."""
+    routes = {m for m in graph.visited if m[0] == 0 and m[1] >= 16 and not rowe_rom.is_underwater(*m)}
     routes = (routes - blocked) or routes
     hops = hops_from(tuple(anchor))
     if not routes:
@@ -193,8 +198,23 @@ def recommend(status: dict, graph: map_graph.MapGraph) -> tuple:
         grass = grind_map(graph, blocked, anchor, cap)
         return {"mode": "grind", "map": grass, "cap": cap}, f"party {len(party)}/6, lowest attacker L{low} vs cap {cap}, grind {grass} toward {list(anchor)}"
     if not unbeaten:
-        grass = grind_map(graph, blocked, anchor, None)
-        return {"mode": "grind", "map": grass, "cap": None}, f"at cap {cap}, all Hoenn gyms beaten, holding on {grass}"
+        moves = frozenset(status.get("field_moves", []))
+        # advance the endgame chain to the first map not yet reached that there is a walkable route
+        # to from here, so arrival at (0,8) travels on to the Victory Road entry (16,12) rather than
+        # idling, and each hall drops out once visited. here != m keeps a travel-to-self off the list
+        dest = next((m for m in ENDGAME_CHAIN
+                     if m not in graph.visited and here != m
+                     and graph.route(here, m, field_moves=moves) is not None), None)
+        if dest is not None:
+            return {"mode": "travel", "to": list(dest)}, f"at cap {cap}, all Hoenn gyms beaten, endgame travel to {list(dest)}"
+        # no walkable route onward: explore toward the first unreached chain map, never grind. a grind
+        # here anchors the grass rank on an unreachable cell and walks the party back across Hoenn, and
+        # at badge 8 the party is over the cap so grinding earns nothing. the reason names here, the
+        # moves it routed under, and the reachable-map count so a bad here (an interior map or a
+        # mid-warp write) reads in one line
+        target = next((m for m in ENDGAME_CHAIN if m not in graph.visited), ENDGAME_CHAIN[-1])
+        hop = graph.route(here, target, field_moves=frozenset())
+        return {"mode": "explore", "to": list(target), "cap": None}, f"at cap {cap}, all Hoenn gyms beaten, here {list(here)}, no endgame travel route under moves {sorted(moves)}, {len(hops)} maps reachable, hop {list(hop) if hop else None}, exploring toward {list(target)}"
     if gym is None:
         target = min(unbeaten, key=lambda g: GYM_BADGE[g])
         return {"mode": "explore", "to": list(target), "cap": None}, f"at cap {cap}, no gym reachable over world edges, exploring toward {list(target)}"
@@ -216,7 +236,7 @@ def main() -> None:
         status = json.load(f)
     age = int(time.time() - status["ts"])
     lead = status["party"][0]
-    graph = map_graph.MapGraph(GRAPH)
+    graph = map_graph.MapGraph(GRAPH, world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs())
     goal, why = recommend(status, graph)
     current = json.load(open(GOAL)) if os.path.exists(GOAL) else None
     running = executor_running()
