@@ -173,6 +173,10 @@ The state files under `states/`:
 - `smoke.py` is the offline promotion gate: it boots frozen savestate fixtures and asserts the nav
   and battle behaviors a swap into the live streamer must not regress. A red check blocks the swap.
 - `gen_nav_map.py` renders the map graph into this repo's `index.html`.
+- `dexgen/gen_species.py` emits `dexgen/species.json`, the web Pokedex dump read straight off the
+  ROM (base stats, types, abilities, evolution path, and per-slot wild-encounter data), reusing
+  `rowe_rom.py` plus a species-name table it fingerprints at 0x40B558; `dexgen/probe_pokedex.py`
+  is its scratch probe. Read-only on the ROM, so a dex lookup needs no emulator boot.
 - `solve_sootopolis_ice.py` solves the thin-ice gym-8 floor into a press route.
 - `lavaridge_watch.py`, `make_fortree_entry.py`, `find_best_state.py` are single-purpose helpers.
 
