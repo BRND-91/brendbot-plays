@@ -88,7 +88,40 @@ def badge_colour(im: Image.Image) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
+SHEET_COLS = 32               # icons per row on the sprite sheet; cell for species id is id-1
+DEX_COUNT = 1025              # national dex; the live board draws only these, so forms stay off the sheet
+
+
+def sheets() -> dict:
+    """One 32x32-cell sprite sheet in national-dex order, cell (n-1) for species id n. The page
+    windows it per cell and derives the seen (desaturated) and unseen (dark grey) states with CSS
+    filters, so only this full-colour sheet ships. Forms carry no dex bit, so the board never
+    draws them."""
+    rows = (DEX_COUNT + SHEET_COLS - 1) // SHEET_COLS
+    owned = Image.new("RGBA", (SHEET_COLS * ICON, rows * ICON))
+    n = 0
+    for sid in range(1, DEX_COUNT + 1):
+        im = icon(sid)
+        if im is None:
+            continue
+        idx = sid - 1
+        owned.paste(im, ((idx % SHEET_COLS) * ICON, (idx // SHEET_COLS) * ICON))
+        n += 1
+    return {"owned": owned, "count": n, "rows": rows}
+
+
 def main() -> None:
+    if "--sheets" in sys.argv:
+        out = sys.argv[1]
+        os.makedirs(out, exist_ok=True)
+        s = sheets()
+        # lossless WebP keeps the RGBA exactly at ~40% of the optimized PNG's bytes
+        s["owned"].save(os.path.join(out, "icons-owned.webp"), "WEBP", lossless=True, method=6)
+        import json
+        with open(os.path.join(out, "icons-sheet.json"), "w") as f:
+            json.dump({"cols": SHEET_COLS, "cell": ICON, "count": DEX_COUNT}, f)
+        print(f"{s['count']} icons on one sheet ({SHEET_COLS}x{s['rows']} cells) in {out}")
+        return
     out = sys.argv[1]
     icons_dir, types_dir = os.path.join(out, "icons"), os.path.join(out, "types")
     os.makedirs(icons_dir, exist_ok=True)

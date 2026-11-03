@@ -11,6 +11,7 @@ import emu_boot as eb
 import rowe_map
 import rowe_rom
 import rowe_symbols as S
+from rowe_state import decode_text
 from nav import DIRS, GATE_SETTLE_FRAMES, ITEM_WATERFALL_TOOL, Grid, Navigator
 
 ROUTE_101 = (0, 16)
@@ -194,6 +195,11 @@ class Errands:
         water (Petalburg Woods' pond is its only north link)."""
         ws = [w for w in rowe_map.warps(self.e) if (w.dest_group, w.dest_num) == dest]
         if not ws:
+            # a dynamic return warp reads its header target as MAP_DYNAMIC and resolves the real
+            # destination only when stepped through, so no concrete dest matches it. Fall back to it
+            # and take wherever it lands; covers every link room and the League exit, not just here.
+            ws = [w for w in rowe_map.warps(self.e) if (w.dest_group, w.dest_num) == S.MAP_DYNAMIC]
+        if not ws:
             return "no_warp"
         grid = Grid(self.e)
         ws = [w for w in ws if not grid.is_wall_warp(w.x, w.y)]
@@ -206,6 +212,69 @@ class Errands:
             if r in ("map_changed", "battle"):
                 return r
         return "stuck"
+
+    def talk_warp(self, obj: tuple, dest: tuple, label: str, presses: int = 8) -> str:
+        """Drive an NPC's native scrolling-multichoice crossing (the Seagallop sailor) to dest. Walk
+        below the object and face up, A through the greeting until the menu locks the field, step the
+        selection down to the row whose on-screen text is `label`, then A until the map changes.
+        "map_changed" on landing dest, "wrong_map" on landing elsewhere (a per-destination flag still
+        shut sends the party back onto the deck), "no_menu" when the menu never opened, "no_row" when
+        `label` is absent from the live option list, else walk_to's status or "stuck". The row is
+        matched by text, since ScriptMenu_ScrollingMultichoice runs in native code the bytecode walker
+        can't read, so script_edges carries these crossings chain-unknown and the destination comes off
+        the live menu rather than menu_sequence. The visible cursor caps at the bottom window row while
+        the list scrolls under it, so the absolute row is driven by the DOWN-press count, not a cursor
+        read."""
+        src = self.map_id()
+        r = self.nav.walk_to((obj[0], obj[1] + 1))
+        if r != "arrived":
+            return r
+        self.run(8, eb.KEY_UP)
+        self.run(8, 0)
+        opened = False
+        for _ in range(presses):
+            self.tap(eb.KEY_A)
+            self.run(45, 0)
+            if self.e.read(S.FIELD_LOCKED, 1)[0] and self.map_id() == src:
+                opened = True
+                break
+        if not opened:
+            return "no_menu"
+        rows = self._menu_rows()
+        row = next((idx for idx, text in sorted(rows.items()) if text == label), None)
+        if row is None:
+            return "no_row"
+        for _ in range(row):
+            self.tap(eb.KEY_DOWN)
+            self.run(18, 0)
+        for _ in range(presses):
+            self.tap(eb.KEY_A)
+            self.run(90, 0)
+            if self.map_id() != src:
+                break
+        land = self.map_id()
+        if land == dest:
+            return "map_changed"
+        if land != src:
+            return "wrong_map"
+        return "stuck"
+
+    def _menu_rows(self) -> dict:
+        """{row index: option text} for the open native multichoice, read off its ListMenuItem array
+        in EWRAM. Each item is {const u8 *label; u32 index}, label a ROM pointer into charmap text, so
+        a contiguous run of pointer-and-index records whose labels decode to letters is the option
+        list. The row index is the item's own index field, which one DOWN press advances by one."""
+        ew = self.e.read(0x02000000, 0x40000)
+        rows: dict = {}
+        for off in range(0, len(ew) - 8, 4):
+            ptr = struct.unpack_from("<I", ew, off)[0]
+            if 0x08000000 <= ptr < 0x0A000000:
+                text = decode_text(self.e.read(ptr, 24))
+                if len(text) >= 3 and text.strip() and all(c.isalpha() or c == " " for c in text):
+                    idx = struct.unpack_from("<I", ew, off + 4)[0]
+                    if idx < 24:
+                        rows.setdefault(idx, text)
+        return rows
 
     def descend_gym(self, dest: tuple) -> str:
         """Out of a room gym (Petalburg: rooms stacked on one map, doors up, floor mats back

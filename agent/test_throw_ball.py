@@ -28,9 +28,19 @@ class G:
         return True
 
 
+class E:
+    """Emulator double for the back-out dump; the real routine saves state + png on no bag open."""
+    def save_state(self) -> bytes:
+        return b""
+
+    def save_png(self, path: str) -> None:
+        pass
+
+
 def player(g: G) -> Player:
     p = Player.__new__(Player)
     p.g = g
+    p.e = E()
     p.keys = []
 
     def tap(keys: int, hold: int = 8, gap: int = 12) -> None:
@@ -53,5 +63,14 @@ def test_bag_never_opened_backs_out_with_b():
     p = player(G(0x8000000, cursor=0))
     p.throw_ball()
     # one A is the open attempt; another A outside the bag fires whatever the cursor sits on
+    assert p.keys.count(eb.KEY_A) == 1
+    assert p.keys[-1] == eb.KEY_B
+
+
+def test_use_hp_item_bag_never_opened_backs_out_with_b():
+    # use_hp_item_in_battle taps RIGHT+A then walks the pockets off bag_position; an eaten RIGHT
+    # leaves the Fight list up, so the cb2 check must back out before any pocket tap reaches it
+    p = player(G(0x8000000, cursor=0))
+    p.use_hp_item_in_battle(pocket_slot=0, target_slot=2)
     assert p.keys.count(eb.KEY_A) == 1
     assert p.keys[-1] == eb.KEY_B

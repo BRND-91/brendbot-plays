@@ -10,7 +10,7 @@ her tile; the emulator resolves each drop on the step, so a node carries no mode
     probe_lavaridge_bfs.py          search from the entry state, write the route
     probe_lavaridge_bfs.py --replay re-run an existing route's presses and rewrite its states
 
-Writes states/probe/lavaridge_route.json and merges the route into gym_routes.json under "4,1".
+Writes states/fixtures/lavaridge_route.json and merges the route into gym_routes.json under "4,1".
 """
 import heapq
 import json
@@ -23,9 +23,9 @@ import play
 from nav import DIRS, GATE_SETTLE_FRAMES
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.join(BASE, "states", "probe", "lavaridge_src.ss")  # frozen copy of the live save, made at launch
-ENTRY = os.path.join(BASE, "states", "probe", "lavaridge_entry.ss")
-OUT = os.path.join(BASE, "states", "probe", "lavaridge_route.json")
+SRC = os.path.join(BASE, "states", "fixtures", "lavaridge_src.ss")  # frozen copy of the live save, made at launch
+ENTRY = os.path.join(BASE, "states", "fixtures", "lavaridge_entry.ss")
+OUT = os.path.join(BASE, "states", "fixtures", "lavaridge_route.json")
 GYM = (4, 1)              # Lavaridge gym 1F (group, num), the leader's floor
 STAND = (13, 10)         # the tile in front of Flannery on 1F
 SETTLE_FRAMES = GATE_SETTLE_FRAMES

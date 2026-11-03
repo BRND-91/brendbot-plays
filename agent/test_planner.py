@@ -10,10 +10,11 @@ import planner
 import rowe_rom
 
 
-def _status(map_id, badges, beaten, cap_level=21, party=6):
+def _status(map_id, badges, beaten, cap_level=21, party=6, johto=()):
     return {
         "badges": badges,
         "badge_flags": [g in beaten for g in range(8)],
+        "johto_flags": [g in johto for g in range(8)],
         "party": [{"level": cap_level, "moves": [{"name": "Tackle", "power": 40, "pp": 10}]}
                   for _ in range(party)],
         "map": list(map_id),
@@ -39,7 +40,7 @@ def main() -> None:
     if had_closed:
         os.replace(planner.GYM_CLOSED, closed_bak)
     try:
-        graph = map_graph.MapGraph(graph_path)
+        graph = map_graph.MapGraph(graph_path, world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs())
 
         # Check: cap 21, badge 1, Route 102 (0,17) -> gym (8,1) Petalburg, the nearest unbeaten
         # gym by world-edge hops, never a grind
@@ -72,7 +73,7 @@ def main() -> None:
         # level. Route 101 (0,16), Route 102 (0,17) and Route 103 (0,19) walked, anchored on
         # Petalburg (8,1): the pick is (0,19), gym-close with the higher land level, and Route
         # 101 ranks below Route 102
-        gg = map_graph.MapGraph(graph_path2)
+        gg = map_graph.MapGraph(graph_path2, world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs())
         gg.visited.update({(0, 16), (0, 17), (0, 19)})
         assert planner.grind_map(gg, frozenset(), (8, 1), 21) == [0, 19], planner.grind_map(gg, frozenset(), (8, 1), 21)
         assert planner.grind_map(gg, frozenset({(0, 19)}), (8, 1), 21) == [0, 17], "Route 101 ranks below Route 102"
@@ -123,45 +124,63 @@ def main() -> None:
         assert reopened["mode"] == "gym" and reopened["map"] == [8, 1], reopened
         graph.gated.clear()
 
-        # a post-badge hold with no walkable route to Ever Grande (0,8) explores toward (0,8), never
-        # grind_map. a grind fallback here ranks grass by hops to the unreachable target and walks
-        # the party back across Hoenn (the live loop that swam it west), and at cap 45 the badge-8
-        # party is over the cap so a grind earns nothing. Gate every world edge into (0,8).
-        g5 = map_graph.MapGraph(graph_path3)
-        g5.visited.update({(0, 16), (0, 40)})
+        # all 8 badges in, every Hoenn gym down, but no walkable route onto the endgame chain:
+        # explore toward its first unreached map, never grind_map. a grind fallback ranks grass by
+        # hops to the unreachable target and walks the party back across Hoenn (the live loop that
+        # swam it west), and at cap the party is over it so a grind earns nothing. Gate every world
+        # edge into Victory Road 1F.
+        g5 = map_graph.MapGraph(graph_path3, world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs())
+        g5.visited.update({(0, 16), (0, 8)})
+        chain = set(planner.ENDGAME_CHAIN)
         for p, ds in rowe_rom.world_edges().items():
-            if (0, 8) in ds:
-                g5.gated[(p, (0, 8))] = frozenset({"SURF"})
-        st = _status((0, 16), 8, set(range(8)), cap_level=45)
+            for c in ds & chain:
+                g5.gated[(p, c)] = frozenset({"SURF"})
+        st = _status((0, 16), 8, set(range(8)), cap_level=50, johto=set(range(8)))
         st["field_moves"] = ["SURF"]
-        st["goal"] = {"mode": "travel", "to": [0, 8]}
-        assert g5.route((0, 16), (0, 8), field_moves=frozenset({"SURF"})) is None, "test needs no route to (0,8)"
+        st["goal"] = {"mode": "travel", "to": [24, 43]}
+        assert g5.route((0, 16), (24, 43), field_moves=frozenset({"SURF"})) is None, "test needs no route to (24,43)"
         g5goal, g5why = planner.recommend(st, g5)
-        assert g5goal["mode"] == "explore" and g5goal["to"] == [0, 8], (g5goal, g5why)
-        assert g5goal["mode"] != "grind", "no grind fallback at badge 8, it walks the party across Hoenn"
+        assert g5goal["mode"] == "explore" and g5goal["to"] == [24, 43], (g5goal, g5why)
+        assert g5goal["mode"] != "grind", "no grind fallback with all badges in, it walks the party across Hoenn"
         # the reason carries here, the moves it routed under, and the reachable-map count, so a bad
         # here (an interior map or a mid-warp write) is a one-line diagnosis
         assert "[0, 16]" in g5why and "['SURF']" in g5why and "reachable" in g5why, g5why
 
-        # arrival at Ever Grande, here == (0,8): the endgame chain travels on to the first unreached
-        # hall, the Victory Road entry (16,12), never grinds back west. this needs the real ROM warp
-        # edges, so build a world-backed graph with (0,8) already reached. the here != m guard skips
-        # the self-hop and the (0,8)->(16,12) warp is open
+        # all 8 badges in and every Hoenn gym down, arrival at Ever Grande (0,8): the endgame chain
+        # travels on into Victory Road (24,43), never grinds back west and never routes to a Sevii
+        # phantom. the (0,8)->(24,43) warp is open and here != m skips the self-hop. this needs the
+        # real ROM warp edges, hence the world-backed graph.
         gw = map_graph.MapGraph(graph_path3, world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs())
         gw.visited.add((0, 8))
-        arr = _status((0, 8), 8, set(range(8)), cap_level=45)
-        arr["field_moves"] = ["SURF", "WATERFALL", "DIVE"]
-        arrgoal, arrwhy = planner.recommend(arr, gw)
-        assert arrgoal["mode"] == "travel" and arrgoal["to"] == [16, 12], (arrgoal, arrwhy)
-        assert arrgoal["mode"] != "grind", arrwhy
+        # all 16 gym flags in (8 Hoenn + 8 Johto): the guard is lifted and travel enters Victory Road
+        leag = _status((0, 8), 8, set(range(8)), cap_level=50, johto=set(range(8)))
+        leag["field_moves"] = ["SURF", "WATERFALL", "DIVE"]
+        leaggoal, leagwhy = planner.recommend(leag, gw)
+        assert leaggoal["mode"] == "travel" and leaggoal["to"] == [24, 43], (leaggoal, leagwhy)
+        assert leaggoal["mode"] != "grind", leagwhy
 
-        # once the entry hall (16,12) is reached it drops out of the chain; standing there the next
-        # unreached target is the League-side hall (16,10)
-        gw.visited.add((16, 12))
-        nxt = _status((16, 12), 8, set(range(8)), cap_level=45)
+        # 8 Hoenn badges but the 8 Johto gyms still open: the League is sealed, so the ladder routes
+        # to the nearest unbeaten Johto gym, Falkner (2,7) one warp from its (0,75) exterior, and
+        # never to Victory Road or the endgame chain
+        assert planner.league_flags(leag) == [True] * 16, planner.league_flags(leag)
+        johto_open = _status((0, 75), 8, set(range(8)), cap_level=50)
+        assert planner.league_flags(johto_open) == [True] * 8 + [False] * 8
+        jgoal, jwhy = planner.recommend(johto_open, gw)
+        assert jgoal["mode"] == "gym" and jgoal["map"] == [2, 7], (jgoal, jwhy)
+
+        # once Victory Road 1F (24,43) is reached it drops out of the chain; standing there the next
+        # unreached target is B1F (24,44), warp-adjacent
+        gw.visited.add((24, 43))
+        nxt = _status((24, 43), 8, set(range(8)), cap_level=50, johto=set(range(8)))
         nxt["field_moves"] = ["SURF", "WATERFALL", "DIVE"]
         nxtgoal, nxtwhy = planner.recommend(nxt, gw)
-        assert nxtgoal["mode"] == "travel" and nxtgoal["to"] == [16, 10], (nxtgoal, nxtwhy)
+        assert nxtgoal["mode"] == "travel" and nxtgoal["to"] == [24, 44], (nxtgoal, nxtwhy)
+
+        # champion (FLAG_SYS_GAME_CLEAR set by the Hall of Fame): League cleared, no goal left
+        champ = _status((16, 11), 8, set(range(8)), cap_level=50, johto=set(range(8)))
+        champ["champion"] = True
+        champgoal, champwhy = planner.recommend(champ, gw)
+        assert champgoal["mode"] == "done", (champgoal, champwhy)
 
         print("test_planner OK")
     finally:

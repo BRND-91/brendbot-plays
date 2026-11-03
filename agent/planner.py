@@ -35,12 +35,33 @@ GYM_BADGE = {(11, 3): 0, (3, 3): 1, (10, 0): 2, (4, 1): 3, (8, 1): 4, (12, 1): 5
 # static object; a gym is pre-seeded here when a non-leader object sits north of the leader and that
 # heuristic would pick it (Lavaridge: trainer Danielle at (5, 2), above Flannery at (13, 9))
 GYM_STAND = {(11, 3): (5, 3), (4, 1): (13, 10)}
+# Johto gym entrance interior -> League flag index (8-15), set on the Johto leader win. These maps
+# carry non-gym music so gym_maps() does not list them; this table is the source. Falkner (2,7)
+# through Clair (2,15), flags 0x2A4-0x2AB; (2,14) between them is the region hub, not a gym.
+JOHTO_GYM = {(2, 7): 8, (2, 8): 9, (2, 9): 10, (2, 10): 11, (2, 11): 12, (2, 12): 13, (2, 13): 14, (2, 15): 15}
+ALL_GYMS = {**GYM_BADGE, **JOHTO_GYM}
 GYM_CLOSED = os.path.join(STATES, "gym_closed.json")
 PARTY_SIZE = 6
 
-# post-badge endgame travel order: Ever Grande City, the Victory Road entry hall reached by the
-# city waterfall, the League-side hall, then the Pokemon League where the Elite Four sequence begins
-ENDGAME_CHAIN = [(0, 8), (16, 12), (16, 10), (25, 60)]
+# vanilla pokeemerald IndoorEverGrande group 16, index for index: the Elite Four chambers, the
+# connecting halls, the League entry floor, the Hall of Fame, and the two link-club rooms.
+ENDGAME_ROOMS = {
+    (16, 0): "Sidney", (16, 1): "Phoebe", (16, 2): "Glacia", (16, 3): "Drake", (16, 4): "Wallace",
+    (16, 5): "Hall1", (16, 6): "Hall2", (16, 7): "Hall3", (16, 8): "Hall4", (16, 9): "Hall5",
+    (16, 10): "League1F", (16, 11): "HallOfFame", (16, 12): "Center1F", (16, 13): "Center2F",
+    (16, 14): "League2F",
+}
+# Victory Road is group 24: 1F, B1F, B2F. The city (0,8) doors (18,41) south and (18,27) north both
+# warp to VR 1F (24,43); VR exits back into the League half of (0,8), which reaches League1F (16,10).
+VICTORY_ROAD = [(24, 43), (24, 44), (24, 45)]
+# The League 1F door guard despawns on flag 0xDFA, which the Ever Grande map-load chain (ROM
+# 0x82f861c) sets only once all 16 gym flags are up: the 8 Hoenn badges 0xCD7-0xCDE and the 8 Johto
+# badges 0x2A4-0x2AB (leaders Falkner through Clair, gyms on group 2). So League-forward travel
+# waits on 16 gyms, not 8 Hoenn badges. Order once every gym is down: Victory Road, then the
+# League-half halls and the Elite Four ladder, League1F -> Hall5 -> Sidney -> Hall1 -> Phoebe -> ...
+# -> Hall4 -> Wallace -> Hall of Fame, each dropping out as reached. group 16 is IndoorEverGrande.
+ENDGAME_CHAIN = VICTORY_ROAD + [(16, 10), (16, 9), (16, 0), (16, 5), (16, 1), (16, 6),
+                                (16, 2), (16, 7), (16, 3), (16, 8), (16, 4), (16, 11)]
 
 
 def executor_running() -> bool:
@@ -129,20 +150,21 @@ def still_closed(status: dict, graph: "map_graph.MapGraph") -> set:
 
 
 def hops_from(start: tuple, graph: "map_graph.MapGraph | None" = None, moves: frozenset = frozenset()) -> dict:
-    """BFS hop distance to every map the party can traverse from `start`, over the ROM's world
-    adjacency unioned with the borders the executor has walked (`graph.adj`) and skipping any
-    border the graph recorded gated under exactly `moves`. Routing the gym ladder over the same
-    graph the executor moves on keeps the planner from calling a gym reachable across a border the
-    walk gave up on; a gym nobody has walked to still gets a distance from the world table alone."""
+    """BFS hop distance to every map the party can traverse from `start`, over the same gated
+    three-layer neighbor set `MapGraph.route` walks (the world table, the walked `adj` borders, and
+    the script warps whose gate flags are currently set) and skipping any border the graph recorded
+    gated under exactly `moves`. hops_from and route disagreeing on reachability is what made the
+    planner emit explore for a gym route could already reach, so both read one neighbor set now; a
+    gym nobody has walked to still gets a distance from the world table when no graph is passed."""
     edges = rowe_rom.world_edges()
-    adj = graph.adj if graph is not None else {}
     gated = graph.gated if graph is not None else {}
     dist = {start: 0}
     frontier = [start]
     while frontier:
         nxt = []
         for m in frontier:
-            for d in edges.get(m, set()) | adj.get(m, set()):
+            dests = graph.neighbors(m) if graph is not None else edges.get(m, set())
+            for d in dests:
                 if d in dist or gated.get((m, d)) == moves:
                     continue
                 dist[d] = dist[m] + 1
@@ -151,11 +173,20 @@ def hops_from(start: tuple, graph: "map_graph.MapGraph | None" = None, moves: fr
     return dist
 
 
-def unbeaten_gyms(status: dict, badges: int) -> list:
-    """Gym entrances whose per-gym badge flag is unset. The count alone cannot say which, since
-    ROWE lets badges fall in any order, so a flag list is used and a count is the fallback."""
-    flags = status.get("badge_flags") or [i < badges for i in range(len(GYM_BADGE))]
-    return [g for g, bi in GYM_BADGE.items() if bi >= len(flags) or not flags[bi]]
+def league_flags(status: dict) -> list:
+    """The 16 League-entry gym flags as booleans: the 8 Hoenn badges then the 8 Johto badges
+    (flags 0x2A4-0x2AB, Falkner through Clair). The Ever Grande guard flag 0xDFA sets only when all
+    16 are up, so 8 Hoenn badges alone leaves the guard standing and the League sealed."""
+    hoenn = status.get("badge_flags") or [False] * len(GYM_BADGE)
+    johto = status.get("johto_flags") or [False] * len(JOHTO_GYM)
+    return list(hoenn) + list(johto)
+
+
+def unbeaten_gyms(status: dict) -> list:
+    """Gym entrances whose own flag is unset, Hoenn and Johto together. ROWE lets badges fall in any
+    order, so each gym reads its flag from league_flags rather than the badge count."""
+    flags = league_flags(status)
+    return [g for g, bi in ALL_GYMS.items() if bi >= len(flags) or not flags[bi]]
 
 
 def nearest_gym(unbeaten: list, hops: dict, shut: set) -> tuple | None:
@@ -184,39 +215,42 @@ def planning_anchor(status: dict, here: tuple, gym: tuple | None) -> tuple:
 def recommend(status: dict, graph: map_graph.MapGraph) -> tuple:
     """(goal dict, reason)"""
     badges = status.get("badges", 0)
-    cap = CAPS[badges]
+    graph.cur_badges = badges
+    cap = CAPS[badges] if badges < len(CAPS) else CAPS[-1]
     party = status["party"]
     attackers = [m for m in party if any(mv["power"] >= 10 and mv["pp"] for mv in m["moves"])]
     low = min((m["level"] for m in attackers), default=0)
     here = tuple(status["map"])
     blocked = blocked_grinds(status)
     hops = hops_from(here, graph, frozenset(status.get("field_moves", [])))
-    unbeaten = unbeaten_gyms(status, badges)
+    unbeaten = unbeaten_gyms(status)
     gym = nearest_gym(unbeaten, hops, still_closed(status, graph))
     anchor = planning_anchor(status, here, gym)
     if len(party) < PARTY_SIZE or low < cap:
         grass = grind_map(graph, blocked, anchor, cap)
         return {"mode": "grind", "map": grass, "cap": cap}, f"party {len(party)}/6, lowest attacker L{low} vs cap {cap}, grind {grass} toward {list(anchor)}"
     if not unbeaten:
+        if status.get("champion"):
+            return {"mode": "done"}, "champion, every badge in and the League cleared, no goal left"
         moves = frozenset(status.get("field_moves", []))
-        # advance the endgame chain to the first map not yet reached that there is a walkable route
-        # to from here, so arrival at (0,8) travels on to the Victory Road entry (16,12) rather than
-        # idling, and each hall drops out once visited. here != m keeps a travel-to-self off the list
+        # every gym down, all 16 League flags in: advance the endgame chain to the first map not
+        # yet reached that there is a walkable route to from here, so arrival at (0,8) travels on into
+        # Victory Road and the League halls and each room drops out once cleared. here != m keeps a
+        # travel-to-self off it
         dest = next((m for m in ENDGAME_CHAIN
                      if m not in graph.visited and here != m
                      and graph.route(here, m, field_moves=moves) is not None), None)
         if dest is not None:
-            return {"mode": "travel", "to": list(dest)}, f"at cap {cap}, all Hoenn gyms beaten, endgame travel to {list(dest)}"
+            return {"mode": "travel", "to": list(dest)}, f"at cap {cap}, {badges} badges, League travel to {list(dest)} ({ENDGAME_ROOMS.get(tuple(dest), 'VictoryRoad')})"
         # no walkable route onward: explore toward the first unreached chain map, never grind. a grind
         # here anchors the grass rank on an unreachable cell and walks the party back across Hoenn, and
-        # at badge 8 the party is over the cap so grinding earns nothing. the reason names here, the
-        # moves it routed under, and the reachable-map count so a bad here (an interior map or a
-        # mid-warp write) reads in one line
+        # at cap the party earns nothing. the reason names here, the moves it routed under, and the
+        # reachable-map count so a bad here (an interior map or a mid-warp write) reads in one line
         target = next((m for m in ENDGAME_CHAIN if m not in graph.visited), ENDGAME_CHAIN[-1])
         hop = graph.route(here, target, field_moves=frozenset())
-        return {"mode": "explore", "to": list(target), "cap": None}, f"at cap {cap}, all Hoenn gyms beaten, here {list(here)}, no endgame travel route under moves {sorted(moves)}, {len(hops)} maps reachable, hop {list(hop) if hop else None}, exploring toward {list(target)}"
+        return {"mode": "explore", "to": list(target), "cap": None}, f"at cap {cap}, {badges} badges, here {list(here)}, no League travel route under moves {sorted(moves)}, {len(hops)} maps reachable, hop {list(hop) if hop else None}, exploring toward {list(target)}"
     if gym is None:
-        target = min(unbeaten, key=lambda g: GYM_BADGE[g])
+        target = min(unbeaten, key=lambda g: ALL_GYMS[g])
         return {"mode": "explore", "to": list(target), "cap": None}, f"at cap {cap}, no gym reachable over world edges, exploring toward {list(target)}"
     goal = {"mode": "gym", "map": list(gym), "badges": badges}
     if gym in GYM_STAND:

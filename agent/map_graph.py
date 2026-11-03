@@ -17,6 +17,12 @@ import os
 
 Node = tuple  # (map_group, map_num)
 
+# The executor's crossing-primitive generation. Bump when a crossing primitive lands (an NPC-talk
+# warp, a descent link, the live-grid border read). A gate recorded below the current version
+# predates such a fix, so _gate_shut reads it open and the walker retries the crossing once; a fresh
+# failure re-records it at the current version. Pre-version gates on disk load as version 0.
+EXECUTOR_CAP_VERSION = 1
+
 
 def _key(node: Node) -> str:
     return f"{node[0]},{node[1]}"
@@ -28,13 +34,22 @@ def _node(key: str) -> Node:
 
 
 class MapGraph:
-    def __init__(self, path: str, world: dict | None = None, passthrough: dict | None = None):
+    def __init__(self, path: str, world: dict | None = None, passthrough: dict | None = None,
+                 script: dict | None = None, flags: set | None = None):
         self.path = path
         self.adj: dict[Node, set[Node]] = {}
         self.visited: set[Node] = set()
         self.gated: dict[tuple[Node, Node], frozenset] = {}
+        self.gate_badges: dict[tuple[Node, Node], int] = {}
+        self.gate_version: dict[tuple[Node, Node], int] = {}
+        self.gate_reason: dict[tuple[Node, Node], str] = {}
+        self.cur_badges: int = 0
         self.world: dict = {k: set(v) for k, v in (world or {}).items()}
         self.passthrough: dict = {k: set(v) for k, v in (passthrough or {}).items()}
+        # NPC-interaction warps (script_decode.script_edges): a dest is a neighbor only while its
+        # gate flags are all set, so the Seagallop ferry opens the Sevii block once its flag is earned.
+        self.script: dict = {k: {d: frozenset(f) for d, f in v.items()} for k, v in (script or {}).items()}
+        self.flags: set = set(flags or ())
         self.load()
 
     def load(self) -> None:
@@ -44,22 +59,41 @@ class MapGraph:
             data = json.load(f)
         self.visited = {_node(k) for k in data.get("visited", [])}
         self.adj = {_node(k): {_node(v) for v in vs} for k, vs in data.get("adj", {}).items()}
-        self.gated = {(_node(a), _node(b)): frozenset(t) for a, b, t in data.get("gated", [])}
+        self.gated = {}
+        self.gate_badges = {}
+        self.gate_version = {}
+        self.gate_reason = {}
+        for row in data.get("gated", []):
+            edge = (_node(row[0]), _node(row[1]))
+            self.gated[edge] = frozenset(row[2])
+            if len(row) > 3 and row[3] is not None:
+                self.gate_badges[edge] = row[3]
+            self.gate_version[edge] = row[4] if len(row) > 4 else 0
+            if len(row) > 5 and row[5] is not None:
+                self.gate_reason[edge] = row[5]
 
     def save(self) -> None:
+        gated_rows = []
+        for (a, b), t in self.gated.items():
+            row = [_key(a), _key(b), sorted(t), self.gate_badges.get((a, b)),
+                   self.gate_version.get((a, b), 0), self.gate_reason.get((a, b))]
+            gated_rows.append(row)
         data = {
             "visited": sorted(_key(n) for n in self.visited),
             "adj": {_key(k): sorted(_key(v) for v in vs) for k, vs in self.adj.items()},
-            "gated": sorted(([_key(a), _key(b), sorted(t)] for (a, b), t in self.gated.items()),
-                            key=lambda e: (e[0], e[1])),
+            "gated": sorted(gated_rows, key=lambda e: (e[0], e[1])),
         }
         tmp = self.path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(data, f)
         os.replace(tmp, self.path)
 
+    def _script_dests(self, node: Node) -> set:
+        """Script-warp destinations of node whose gate flags are all currently set."""
+        return {d for d, gate in self.script.get(node, {}).items() if gate <= self.flags}
+
     def neighbors(self, node: Node) -> set:
-        return self.adj.get(node, set()) | self.world.get(node, set())
+        return self.adj.get(node, set()) | self.world.get(node, set()) | self._script_dests(node)
 
     def observe(self, here: Node, neighbors: list) -> list:
         """Record that `here` is visited and borders `neighbors`; return nodes seen for the first time."""
@@ -73,10 +107,23 @@ class MapGraph:
         self.save()
         return new
 
+    def _gate_shut(self, here: Node, nb: Node, field_moves) -> bool:
+        """An edge stays shut only while the field-move set and the badge count that recorded it
+        both hold, so gaining an HM or a badge reopens it. A gate recorded by an older executor
+        (gate_version below EXECUTOR_CAP_VERSION) predates a crossing-primitive fix, so it reads
+        open and the walker retries the crossing once; a fresh failure re-records it at the current
+        version. A gate set directly in a test carries no version and is treated as current."""
+        edge = (here, nb)
+        if self.gated.get(edge) != field_moves:
+            return False
+        if self.gate_version.get(edge, EXECUTOR_CAP_VERSION) < EXECUTOR_CAP_VERSION:
+            return False
+        return self.gate_badges.get(edge, self.cur_badges) == self.cur_badges
+
     def _bfs(self, src: Node, is_goal, blocked=frozenset(), field_moves=frozenset()) -> Node | None:
         """First hop out of src along the shortest path to a node is_goal accepts, or None.
-        An edge gated under exactly `field_moves` is impassable at every hop, not just the
-        first, so a route never threads through a border the walk already gave up on."""
+        A shut edge (see `_gate_shut`) is impassable at every hop, not just the first, so a
+        route never threads through a border the walk already gave up on."""
         if is_goal(src):
             return src
         seen = set()
@@ -88,7 +135,7 @@ class MapGraph:
             for nb in sorted(self.neighbors(cur)):
                 if first is None and nb in blocked:
                     continue
-                if self.gated.get((cur, nb)) == field_moves:
+                if self._gate_shut(cur, nb, field_moves):
                     continue
                 if nb == src and src not in self.passthrough.get(cur, ()):
                     continue
@@ -125,11 +172,19 @@ class MapGraph:
             frontier = nxt
         return []
 
-    def block(self, here: Node, neighbor: Node, field_moves=frozenset()) -> None:
-        """Record that here->neighbor had no passable edge tile under `field_moves`, the
-        overworld moves the party knew at the time. The block holds only while that set is
-        unchanged, so gaining Surf reopens the water edge the bot gave up on."""
-        self.gated[(here, neighbor)] = frozenset(field_moves)
+    def block(self, here: Node, neighbor: Node, field_moves=frozenset(), reason: str | None = None) -> None:
+        """Record that here->neighbor had no passable edge tile under `field_moves` at the current
+        badge count. The block holds only while both hold, so gaining an HM or a badge reopens it.
+        A badge-guard edge such as the League doors shut below 16 badges therefore retries once the
+        badge count climbs, instead of staying shut because the field-move set never moved. The gate
+        carries the current EXECUTOR_CAP_VERSION, so a later crossing primitive reopens it for one
+        retry, and `reason` tags why the crossing failed for a later queryable purge."""
+        edge = (here, neighbor)
+        self.gated[edge] = frozenset(field_moves)
+        self.gate_badges[edge] = self.cur_badges
+        self.gate_version[edge] = EXECUTOR_CAP_VERSION
+        if reason is not None:
+            self.gate_reason[edge] = reason
         self.save()
 
     def _open(self, node: Node, blocked=frozenset(), field_moves=frozenset()) -> list:
@@ -137,7 +192,7 @@ class MapGraph:
         this run, and not gated under the current field-move set."""
         return [nb for nb in sorted(self.neighbors(node))
                 if nb not in self.visited and nb not in blocked
-                and self.gated.get((node, nb)) != field_moves]
+                and not self._gate_shut(node, nb, field_moves)]
 
     def explore_hop(self, cur: Node, blocked=frozenset(), field_moves=frozenset()) -> Node | None:
         """Next map to step into to reach an unvisited one: a direct open border first,
@@ -155,4 +210,5 @@ class MapGraph:
 
     def gated_frontier(self, field_moves=frozenset()) -> bool:
         """An unvisited map is reachable only past an edge this field-move set cannot cross."""
-        return any(nb not in self.visited and t == field_moves for (_, nb), t in self.gated.items())
+        return any(nb not in self.visited and self._gate_shut(prev, nb, field_moves)
+                   for (prev, nb) in self.gated)

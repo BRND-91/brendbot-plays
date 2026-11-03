@@ -42,9 +42,21 @@ def main() -> None:
         assert g.nearest(B, {B, D}) == B, "standing in a town is zero hops"
         assert g.nearest(A, {(9, 9)}) is None, "an unknown town is unreachable"
 
+        # a gate carries the badge count that recorded it: the edge is shut at that count and
+        # retried once the count climbs, so a door blocked at 8 badges reopens at 16 with no
+        # field-move change, which the field-move-only key left shut forever
+        g.cur_badges = 8
+        g.block(A, B, frozenset())
+        assert g.route(A, B, field_moves=frozenset()) is None, "edge shut at its writing badge count"
+        g.cur_badges = 16
+        assert g.route(A, B, field_moves=frozenset()) == B, "edge retried once the badge count climbs"
+        g.cur_badges = 8
+        assert g.route(A, B, field_moves=frozenset()) is None, "and shut again back at the writing count"
+
         reloaded = MapGraph(path)
         assert reloaded.visited == g.visited, reloaded.visited
         assert reloaded.adj == g.adj, reloaded.adj
+        assert reloaded.gate_badges.get((A, B)) == 8, reloaded.gate_badges
     finally:
         if os.path.exists(path):
             os.remove(path)

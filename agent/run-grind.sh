@@ -27,7 +27,15 @@ while [ $((end - SECONDS)) -gt 120 ]; do
     child=0
     reason=$(.venv/bin/python -c "import json; print(json.load(open('states/status.json'))['exit_reason'])" 2>/dev/null)
     case "$reason" in
-        unsupported*) echo "supervisor: executor needs a decision ($reason)"; /opt/brendbot/scripts/send-discord "1497841038323220651" "rowe grind halted: $reason"; exit 0 ;;
+        unsupported*)
+            # the executor can exit with nowhere left to explore. never stop the stream here:
+            # planner.py --apply on the next loop re-decides a goal from the latest status, so the
+            # run keeps moving. heartbeat, back off, loop.
+            echo "supervisor: $reason, grind-hold $(date -u +%FT%TZ)"
+            echo "=== supervisor grind-hold $(date -u +%FT%TZ): $reason ===" >>states/grind.log
+            sleep 30
+            continue
+            ;;
     esac
     # stop a map that re-exits identically: 3 runs ending with the same reason at the same map+tile
     # means the planner keeps re-entering a dead spot, so post the reason and position and stop

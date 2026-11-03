@@ -29,13 +29,18 @@ import planner  # noqa: E402
 import rowe_live  # noqa: E402
 import rowe_map  # noqa: E402
 import rowe_symbols as S  # noqa: E402
-from nav import Grid, Navigator  # noqa: E402
+import script_decode  # noqa: E402
+from nav import DIVE_BEHAVIORS, Grid, ITEM_WATERFALL_TOOL, Navigator, WATER_BEHAVIORS  # noqa: E402
 from routines import Errands  # noqa: E402
 from rowe_state import GameState  # noqa: E402
 from stream_sink import FrameStreamer  # noqa: E402
 
 
 _ROM_SHA = None
+
+# Seagallop ferry gates on the overworld heartbeat: CD1 the ferry-service unlock, CE8 and CE7 the
+# archipelago unlocks, so a Sevii crossing is visible with the gate flags it rode in one line.
+FERRY_FLAGS = (0xCD1, 0xCE8, 0xCE7)
 
 
 def rom_sha() -> str:
@@ -206,11 +211,15 @@ CB2_EVOLUTION = 0x8197385  # gMain.callback2 while "What? X is evolving!" plays,
 CB2_NAMING = 0x813088D  # gMain.callback2 on the nickname keyboard, read off a stall dump; START is its OK
 BATTLE_TYPE_TRAINER = 0x08  # gBattleTypeFlags bit; a trainer battle refuses Run
 BATTLE_TYPE_DOUBLE = 0x01  # gBattleTypeFlags bit; two foe slots, so a wild encounter never collapses to single
-# gBattlescriptCurrInstr while a level-up move prompt holds the script, read off staged
-# level-ups: the "Delete a move to make room for X?" box, which also spans the move-select
-# summary screen (gMain.callback2 S.CB2_MOVE_SELECT), and the "Stop learning X?" box
-LEARN_PROMPT = 0x839640F
-STOP_LEARN_PROMPT = 0x8396417
+# gBattlescriptCurrInstr offsets into BattleScript_AskToLearnMove, the layout the move-learn
+# flow shares across builds (vendor/pokebot-gen3 battle_move_replacing): the "Delete a move to
+# make room for X?" box at +0x11 (also the move-select summary screen, gMain.callback2
+# S.CB2_MOVE_SELECT) and the "Stop learning X?" box at +0x20. A level-up reached mid-battle
+# settles a step early on the lead-in text, so the whole region routes to learn_step, not the
+# two box addresses alone, which a staged dump froze on but the live loop steps past.
+ASK_TO_LEARN = 0x83963FE
+LEARN_PROMPT = ASK_TO_LEARN + 0x11
+STOP_LEARN_PROMPT = ASK_TO_LEARN + 0x20
 CB2_MOVE_SELECT = S.CB2_MOVE_SELECT
 MOVE_SELECT_CANCEL_ROW = 4  # the summary lists the four held moves, then the new one as the cancel row
 CB2_PARTY_MENU = S.CB2_PARTY_MENU
@@ -322,7 +331,8 @@ GYM_LEADER_TYPES = [5, 1, 13, 10, 0, 2, 14, 11]
 TYPE_MYSTERY = 9  # the ??? slot in the chart, nothing attacks or defends with it
 CORE_MARGIN_FLOOR = 5   # a core swap needs the larger of this and a CORE_MARGIN_SHARE-th of the core score
 CORE_MARGIN_SHARE = 10
-FLEX_MARGIN = 2         # points a boxed mon must add against the next leader alone before the flex slot moves
+FLEX_MARGIN = 2         # points a boxed mon must out-score the current flex mon by before the flex slot moves
+FLEX_GRIND_DIV = 4      # levels under the cap a flex candidate trades for one point of counter score
 VALUE_DIV = 20          # stat points per score point; a L40 mon's offence + Spe + mean bulk runs ~260, so 13
 CORE_SWAP_VISITS = 4    # heal visits between core swaps, and the visits a mon swapped into the core stays put
 BARRED_VISITS = 8       # heal visits a swapped-out mon stays out of the candidate pool
@@ -337,7 +347,7 @@ class SwapLedger:
     def __init__(self, path: str):
         self.path = path
         self.d = json.load(open(path)) if os.path.exists(path) else {}
-        for key, empty in (("visits", 0), ("last_core_visit", None), ("locked", {}), ("barred", {})):
+        for key, empty in (("visits", 0), ("last_core_visit", None), ("locked", {}), ("barred", {}), ("flex_locked", {})):
             self.d.setdefault(key, empty)
 
     def visit(self) -> None:
@@ -354,12 +364,19 @@ class SwapLedger:
     def barred(self, personality: int) -> bool:
         return self.d["barred"].get(str(personality), 0) > self.d["visits"]
 
-    def record(self, kind: str, in_personality: int, out_personality: int) -> None:
+    def flex_hold(self, personality: int, badges: int) -> bool:
+        """A flex swap made at `badges` badges holds until that leader is beaten, so the incoming mon
+        cannot be swapped back out while the badge count still sits at the value the swap was made for."""
+        return self.d["flex_locked"].get(str(personality), -1) >= badges
+
+    def record(self, kind: str, in_personality: int, out_personality: int, badges: int | None = None) -> None:
         v = self.d["visits"]
         if kind == "core":
             self.d["last_core_visit"] = v
         self.d["locked"][str(in_personality)] = v + CORE_SWAP_VISITS
         self.d["barred"][str(out_personality)] = v + BARRED_VISITS
+        if kind == "flex" and badges is not None:
+            self.d["flex_locked"][str(in_personality)] = badges
         self.save()
 
     def save(self) -> None:
@@ -538,6 +555,28 @@ def best_swap(team: list, box: list, builds: list, slots, margin: int, levels: t
     return best if best and best[2] >= margin else None
 
 
+def score_flex(prof: Profile, level: int, cap: int, nxt: list) -> int:
+    """A flex candidate's value against the next leader's build `nxt`: its coverage scored at the grind
+    cap (prof is built there, so a mon that evolves before the gym is judged as the form that fights),
+    minus one point per FLEX_GRIND_DIV levels it sits under the cap now. A mistyped lead loses on
+    coverage at any level; between two same-type counters the one closer to the cap wins on grind cost."""
+    return matchup([prof], nxt) - max(0, cap - level) // FLEX_GRIND_DIV
+
+
+def best_flex(flex_mon, level: int, box: list, nxt: list, flex: int, cap: int, ivs: tuple):
+    """(flex slot out, box slot in, score gain) for the box mon that most out-scores the current flex
+    mon as a counter to `nxt` once both are at the cap, or None when the best gain is under FLEX_MARGIN.
+    box is [(box slot, mon, level)]. Both sides score through score_flex at the cap, so the comparison
+    is which mon the grind would make the better counter, not which is stronger at today's level."""
+    held = score_flex(mon_profile(flex_mon, cap, ivs), level, cap, nxt)
+    best = None
+    for slot, bm, bl in box:
+        gain = score_flex(mon_profile(bm, cap, ivs), bl, cap, nxt) - held
+        if best is None or gain > best[2]:
+            best = (flex, slot, gain)
+    return best if best and best[2] >= FLEX_MARGIN else None
+
+
 STATUS_WORDS = ((0x7, "SLP"), (0x88, "PSN"), (0x10, "BRN"), (0x20, "FRZ"), (0x40, "PAR"))  # status1 bits: sleep turns, poison or toxic, burn, freeze, paralysis
 
 
@@ -702,6 +741,10 @@ class Player:
         self._switch_active: int | None = None  # personality the voluntary-switch fail count tracks
         self._switch_fails = 0
         self._wild_switched = False  # a wild fight gets one voluntary switch: the low lead out, the finisher in
+        self._start_items: dict = {}  # personality -> held item at that mon's first action, for the Belch precondition; keyed by mon not slot so a switch-in doesn't inherit the slot's prior baseline
+        self._avoid_slots: set = set()  # move slots a freeze bailed on this battle, skipped by pick_move
+        self._freezes = 0  # unstick firings this battle: the first swaps the slot, the second runs from a wild foe
+        self._last_pick = 0  # slot pick_move last returned, the one a freeze blames
 
     def run(self, frames: int, keys: int = 0) -> None:
         if self.stop:
@@ -841,13 +884,31 @@ class Player:
         return b, mons[b], foes
 
     def pick_move(self, me, foes) -> int:
+        self._start_items.setdefault(me.personality, me.item)
         disabled = self.g.disabled_move(me.battler)
-        ranked = [s for foe in foes for s in rank_moves(me, foe) if me.moves[s.slot] != disabled]
-        if not ranked:
-            return first_usable_slot(me.moves, me.pp)
-        top = max(ranked, key=lambda s: s.score)
-        print(f"  {me.nickname}: {top.move.name} x{top.effectiveness:g} est {top.damage:.0f} vs {[f'{f.nickname} {f.hp}/{f.max_hp}' for f in foes]}", flush=True)
-        return top.slot
+        ranked = [s for foe in foes for s in rank_moves(me, foe)
+                  if me.moves[s.slot] != disabled and s.slot not in self._avoid_slots
+                  and self._selectable(me, s.move)]
+        if ranked:
+            top = max(ranked, key=lambda s: s.score)
+            print(f"  {me.nickname}: {top.move.name} x{top.effectiveness:g} est {top.damage:.0f} vs {[f'{f.nickname} {f.hp}/{f.max_hp}' for f in foes]}", flush=True)
+            self._last_pick = top.slot
+            return top.slot
+        # scoring left nothing selectable: take the most-PP move still allowed (Belch barred until
+        # its berry is gone, a freeze-barred slot skipped), else whatever has PP so the engine moves
+        usable = [i for i, (m, pp) in enumerate(zip(me.moves, me.pp))
+                  if m and pp and i not in self._avoid_slots and self._selectable(me, rowe_rom.move(m))]
+        self._last_pick = max(usable, key=lambda i: me.pp[i]) if usable else first_usable_slot(me.moves, me.pp)
+        return self._last_pick
+
+    def _selectable(self, me, move) -> bool:
+        """Belch cannot be chosen until the user's held item is gone this battle, the engine's
+        eaten-berry precondition approximated as a nonzero item at the first action now at zero. A
+        consumed gem or herb trips the same approximation, and the unstick slot-swap is the net for
+        that false positive. Every other move is selectable here."""
+        if move.name.lower() != "belch":
+            return True
+        return self._start_items.get(me.personality, me.item) != 0 and me.item == 0
 
     def catch_plan(self, me, foes) -> tuple:
         """("throw", None) | ("move", slot) | None when no ball goes out this turn.
@@ -971,7 +1032,14 @@ class Player:
                 break
             self.tap(eb.KEY_DOWN if self.g.party_menu_slot() < target_slot else eb.KEY_UP)
             self.run(10)
-        self.tap(eb.KEY_A)
+        # the first A on "Use on which Pokémon?" is eaten while the party menu is still settling,
+        # so press until the pocket count drops: the item is spent the frame the selection lands
+        before = sum(q for _, q in self.g.medicine())
+        for _ in range(5):
+            self.tap(eb.KEY_A)
+            self.run(60)
+            if not self.g.in_battle() or sum(q for _, q in self.g.medicine()) < before:
+                break
         # recovery animation, the "HP restored" line, then the foe's turn; B advances text and
         # is a no-op back at the action menu
         for _ in range(12):
@@ -1033,7 +1101,7 @@ class Player:
             self.run(60)
             return
         instr = self.g.script_instr()
-        if instr in (LEARN_PROMPT, STOP_LEARN_PROMPT):
+        if ASK_TO_LEARN <= instr <= STOP_LEARN_PROMPT:
             self._act_stuck = self._wedge = 0
             self.learn_step(instr, cb2)
             return
@@ -1054,9 +1122,24 @@ class Player:
         if self._wedge >= WEDGE_STEPS:
             self._stall_dump(f"WEDGE: battle frozen {self._wedge} steps, ctrl {wedge_sig[2]:#x} exec {sig[0]:#x}")
         if self._act_stuck >= 4:
-            print(f"  unstick: battle frozen {self._act_stuck} steps, clearing submenu", flush=True)
-            self.tap(eb.KEY_B)
-            self.run(30)
+            self._freezes += 1
+            _, me_f, _ = self.sides()
+            wild = not self.g.battle_type_flags() & BATTLE_TYPE_TRAINER
+            if self._freezes >= 2 and wild and me_f is not None and me_f.battler == 0:
+                # the slot swap did not clear it and the foe is wild: leave rather than freeze the
+                # turn again on a move the engine keeps refusing. Run sits down-right of Fight
+                print(f"  unstick: second freeze after {self._act_stuck} steps vs wild, running", flush=True)
+                self.tap(eb.KEY_DOWN)
+                self.tap(eb.KEY_RIGHT)
+                self.tap(eb.KEY_A)
+                self.run(150)
+            else:
+                # bar the slot the freeze is stuck on so pick_move takes the next usable move, then
+                # clear whatever box is up; B on the bare grid is a no-op
+                self._avoid_slots.add(self._last_pick)
+                print(f"  unstick: frozen {self._act_stuck} steps, barring slot {self._last_pick}, next usable move", flush=True)
+                self.tap(eb.KEY_B)
+                self.run(30)
             self._act_stuck = 0
         b, me, foes = self.sides()
         if b % 2 or me is None:
@@ -1181,7 +1264,9 @@ class Player:
                         if self.g.action_cursor(b) == ACTION_POKEMON:
                             break
                         self.tap(eb.KEY_DOWN)
+                        self.run(10)
                     self.tap(eb.KEY_A)
+                    self.run(20)
                 for _ in range(5):
                     self.run(30)
                     if self.g.callback2() in CB2_PARTY_MENU:
@@ -1348,11 +1433,6 @@ class Player:
 
     def learn_step(self, instr: int, cb2: int) -> None:
         """Answer a level-up move prompt: take the new move over the least valuable slot, else decline."""
-        if instr == STOP_LEARN_PROMPT:
-            # reached only after a decline, so Yes
-            self.tap(eb.KEY_A)
-            self.run(30)
-            return
         new = self.g.offered_move()
         mon = self.g.party()[self.g.learning_mon()]
         slot = replacement_slot(mon, new)
@@ -1362,6 +1442,12 @@ class Player:
                 self.tap(eb.KEY_DOWN)
                 self.run(10)
             self.tap(eb.KEY_A)
+            self.run(60)
+            return
+        if instr == STOP_LEARN_PROMPT:
+            # "Should X stop learning Y?" Yes drops the move we declined; No bounces back to the
+            # "make room?" box when a slot was picked and the box loop landed here first
+            self.tap(eb.KEY_A if slot is None else eb.KEY_B)
             self.run(60)
             return
         if slot is None:
@@ -1386,7 +1472,7 @@ class Player:
         # the menu ate every press (Fortree's Flint + Edwardo fight, ten STALLs on Greedent)
         fielded = {m.personality for m in mons[0::2]}
         bench = [m for m in party if m.personality not in fielded]
-        target = next((m.slot for m in bench if m.personality == name and m.hp > 0), None)
+        target = next((m.slot for m in bench if name in (m.personality, m.nickname) and m.hp > 0), None)
         if target is None and any(m.hp == 0 for m in mons[0::2]):
             # a fielded mon fainted (the lead, or the partner in a double), so the menu is a forced
             # replacement that ignores B; pick the best live bench mon instead of parking on Cancel
@@ -1548,8 +1634,11 @@ class Player:
             "ts": time.time(), "pid": os.getpid(), "goal": self.goal,
             "map": [group, num], "tile": [x, y], "party": party, "boxes": boxes, "field_moves": sorted(self.field_moves()),
             "balls": dict(self.g.poke_balls()).get(catch.POKE_BALL, 0), "money": self.g.money(),
-            "badges": self.g.badges(),
+            "badges": self.g.badges(), "var_badges": self.g.var(S.VAR_NUM_BADGES),
             "badge_flags": [self.g.flag(S.FLAG_BADGE01 + i) for i in range(S.BADGE_COUNT)],
+            "johto_flags": [self.g.flag(S.JOHTO_BADGE01 + i) for i in range(S.JOHTO_BADGE_COUNT)],
+            "champion": self.g.flag(S.FLAG_SYS_GAME_CLEAR),
+            "ferry_flags": {f"0x{f:X}": self.g.flag(f) for f in FERRY_FLAGS},
             "caught_species": sorted(self.ledger.caught),
             "dex_owned": dex_owned, "dex_seen": dex_seen, "rom_sha": rom_sha(),
             "wanted_types": sorted(rowe_rom.TYPE_NAMES[t] for t in self.wanted),
@@ -1596,7 +1685,18 @@ class Player:
             if badges > self.goal.get("badges", 0):
                 raise GoalExit(f"goal reached: badge {badges} earned")
             return
+        if mode == "sevii":
+            # the Sevii leg's routed destination and its badge-flag decode are a later ticket. Until
+            # then the leg maps westward toward the island pass, which nothing here completes, so the
+            # stream stays up instead of halting on an unsupported goal.
+            return
         raise GoalExit(f"unsupported goal {self.goal}")
+
+    def _graph_flags(self) -> set:
+        """Gate flags currently set, read live from the emulator for the script-edge layer. Only the
+        flags that actually gate a crossing are read, so routing sees a ferry open the frame the game
+        sets its flag rather than from a snapshot on disk."""
+        return {f for f in script_decode.gate_flags() if self.g.flag(f)}
 
     def replan(self) -> bool:
         """After a GoalExit, re-decide the goal in this process the way run-grind.sh's planner
@@ -1619,6 +1719,7 @@ class Player:
             self.keep_state = False
         else:
             self.snapshot(self.state_path)
+        self.graph.flags = self._graph_flags()
         goal, why = planner.recommend(status, self.graph)
         print(f"replan: {goal} because {why}", flush=True)
         goal_path = os.path.join(os.path.dirname(self.state_path), "goal.json")
@@ -1845,13 +1946,17 @@ class Player:
     def do_pc_swap(self) -> None:
         """Inside a Center after the heal, one heal visit on the ledger: a core swap when the budget is
         open (CORE_SWAP_VISITS since the last) and a box mon lifts the score against the League and every
-        remaining leader by the core margin, else a flex swap when one lifts the score against the next
-        leader alone by FLEX_MARGIN, through the storage PC. A mon swapped in, core or flex, is locked for
-        CORE_SWAP_VISITS, a mon swapped out is barred for BARRED_VISITS, and a candidate more than
-        LEVEL_CUTOFF under the grind map's top wild level is cut before scoring. Every box is a
-        candidate since swap_at_pc turns pages."""
+        remaining leader by the core margin, else a flex swap when a box mon out-scores the current flex
+        mon as a counter to the next leader by FLEX_MARGIN, through the storage PC. Core scores every mon
+        at the party floor; flex scores both sides at the grind cap, since a flex candidate is judged by
+        what the grind makes it before the gym. A core mon swapped in is locked for CORE_SWAP_VISITS, a
+        flex mon swapped in holds until that leader is beaten, a mon swapped out is barred for
+        BARRED_VISITS, and a candidate more than LEVEL_CUTOFF under the grind map's top wild level is cut
+        before scoring unless its type fills a gap. Every box is a candidate since swap_at_pc turns
+        pages."""
         ledger = SwapLedger(os.path.join(os.path.dirname(self.state_path), "swaps.json"))
         ledger.visit()
+        badges = self.g.badges()
         box = [bm for bm in self.g.boxes() if bm.species < rowe_rom.SPECIES_COUNT and not ledger.barred(bm.personality)]
         party = self.g.party()
         floor = min(m.level for m in party)
@@ -1865,16 +1970,18 @@ class Player:
                    or set(rowe_rom.species(bm.species).types) & self.wanted]
         if not box:
             return
+        box_level = {bm.slot: rowe_rom.level_from_exp(bm.species, bm.experience) for bm in box}
         pool = [(bm.slot, mon_profile(bm, floor, ivs)) for bm in box]
-        levels = ([m.level for m in party], {bm.slot: rowe_rom.level_from_exp(bm.species, bm.experience) for bm in box})
+        levels = ([m.level for m in party], box_level)
         flex = flex_slot(team, core_builds)
         movable = [i for i in range(len(team)) if not ledger.locked(party[i].personality)]
         plan, kind = None, "core"
         if ledger.core_open():
             plan = best_swap(team, pool, core_builds, [i for i in movable if i != flex], core_margin(team, core_builds), levels)
-        if plan is None and nxt is not None and flex in movable:
+        if plan is None and nxt is not None and flex in movable and not ledger.flex_hold(party[flex].personality, badges):
             kind = "flex"
-            plan = best_swap(team, pool, [nxt], [flex], FLEX_MARGIN, levels)
+            cap = self.goal.get("cap") or top or floor
+            plan = best_flex(party[flex], party[flex].level, [(bm.slot, bm, box_level[bm.slot]) for bm in box], nxt, flex, cap, ivs)
         if plan is None:
             print(f"box swap: none at visit {ledger.d['visits']}, floor {floor}, core {'open' if ledger.core_open() else 'closed'}", flush=True)
             return
@@ -1885,10 +1992,19 @@ class Player:
         print(f"box swap ({kind}): {outgoing.nickname} slot {out} out, species {incoming.species} box slot {slot} in, "
               f"+{gain} -> {ok}", flush=True)
         if ok:
-            ledger.record(kind, incoming.personality, outgoing.personality)
+            ledger.record(kind, incoming.personality, outgoing.personality, badges)
 
     def field_moves(self) -> frozenset:
         return field_tools(self.g.badges())
+
+    def _grid(self) -> Grid:
+        """Live-frame grid with climb set from the Waterfall Tool in the bag, the same check the
+        crossing path uses, so a reachability read and the walk that acts on it agree on whether a
+        fall is climbable. A grid built without this check left climb False and hid the upper half
+        of any map reached over a waterfall."""
+        grid = Grid(self.e)
+        grid.climb = any(item == ITEM_WATERFALL_TOOL for item, _ in self.g.key_items())
+        return grid
 
     def _landing_rank(self, hop: tuple, nxt: tuple | None, surf: bool = False):
         """(rank, w, h) for a crossing into `hop`, off its ROM layout, or None when unreadable.
@@ -1949,7 +2065,15 @@ class Player:
                 how = f"dir {c.direction}"
                 break
         else:
-            if hop in rowe_rom.dive_script_edges().get(here, set()):
+            ferry_label = script_decode.seagallop_label(here, hop)
+            ferry_obj = script_decode.talk_object(here, hop) if ferry_label is not None else None
+            if ferry_obj is not None:
+                # the Seagallop crossing is a talk, not a step-on warp: the sailor opens a native
+                # scrolling menu whose row text picks the destination, so take_warp finds no tile and
+                # talk_warp drives the menu to the matching row instead.
+                status = self.errands.talk_warp(ferry_obj["obj"], hop, ferry_label)
+                how = "ferry"
+            elif hop in rowe_rom.dive_script_edges().get(here, set()):
                 # here and hop are linked by a setdivewarp the ROM connection table never carries
                 # (Sootopolis (0,7) <-> underwater (24,5)). Surfacing from the seabed emerges on a B
                 # press; diving in from the surface submerges on an A press over deep water.
@@ -2007,25 +2131,29 @@ class Player:
         if self.graph is None:
             return
         if status == "unreachable":
-            # no path from where the player stands: a border the ROM has no standable tile on is
-            # shut for good, any other is a region miss that the run-local _stuck already holds,
-            # so it never counts toward the gate (Route 134 gated both exits from one pocket)
-            if self._border_open(here, hop) is False:
-                self.graph.block(here, hop, self.field_moves())
+            # no path from where the player stands: a border the ROM layout reads shut (no_warp,
+            # unreachable, or a dormant dive) is gated for good under that reason, any other is a
+            # region miss the run-local _stuck already holds and never counts toward the gate
+            # (Route 134 gated both exits from one pocket)
+            reason = self._border_open(here, hop)
+            if reason in ("no_warp", "unreachable", "script_no_go"):
+                self.graph.block(here, hop, self.field_moves(), reason=reason)
             return
         moves = self.field_moves()
         key = self._stuck_key(here, hop, moves)
         self._stuck_hits[key] = self._stuck_hits.get(key, 0) + 1
         self._save_stuck_hits()
         if self._stuck_hits[key] >= STUCK_GATE:
-            self.graph.block(here, hop, moves)
+            self.graph.block(here, hop, moves, reason="stuck")
 
-    def _border_open(self, here: tuple, hop: tuple) -> bool | None:
-        """Whether the ROM layout of `here` holds any tile the party could stand on along the
-        border that connects to `hop`, read off the layout rather than from where the player
-        stands, since a map split by water or a ledge (Route 110 either side of the cycling road)
-        reaches a border from one region and not the other. For a warp hop, whether any warp
-        tile to it is enterable at all; None when `hop` is neither a connection nor a warp."""
+    def _border_open(self, here: tuple, hop: tuple) -> str | None:
+        """Why the border of `here` toward `hop` is crossable, read off the ROM layout rather than
+        from where the player stands, since a map split by water or a ledge (Route 110 either side
+        of the cycling road) reaches a border from one region and not the other. "open" when a
+        standable connection tile or an enterable warp tile exists, "no_warp" when every warp tile
+        to `hop` is solid rock, "unreachable" when a connection border holds no passable tile,
+        "script_no_go" when a dive header is dormant (water present, no diveable tile). None when
+        `hop` is neither a connection nor a warp of `here`, or the layout is unreadable."""
         layout = rowe_rom.map_cells(*here)
         if layout is None:
             return None
@@ -2039,7 +2167,29 @@ class Player:
             warps = [(x, y) for x, y, dest in rowe_rom.map_warps(*here) if tuple(dest) == hop]
             if not warps:
                 return None
-            return not all(grid.is_wall_warp(x, y) for x, y in warps)
+            # the static map_cells layout misreads some warp tiles (a dead wall-warp reads as open
+            # floor), so is_wall_warp off the from-cells grid lies; the live grid carries the
+            # resolved collision, so read the warp tile there whenever the party stands on `here`.
+            pos = self.g.position()[2:] if getattr(self, "g", None) is not None else None
+            wgrid = self._grid() if here == pos else grid
+            return "open" if not all(wgrid.is_wall_warp(x, y) for x, y in warps) else "no_warp"
+        if direction in (rowe_map.DIR_DIVE, rowe_map.DIR_EMERGE):
+            # a dive/emerge link fires from a water tile the field-move prompt accepts, never a
+            # border tile, so "open" is whether the layout holds such a tile. A dive needs a
+            # diveable (deep-water) tile; a surf-only ocean route carries a dormant dive header to
+            # its underwater twin and has none, so that link is shut. Emerge surfaces from the
+            # seabed, which every behavior but the no-surface pair does, so it reads open. A layout
+            # whose behaviors carry no water at all is unreadable here, so it gates nothing (None).
+            if direction == rowe_map.DIR_EMERGE:
+                return "open"
+            if grid._behavior is None:
+                return None
+            behaviors = {grid._behavior(grid.cell(x, y) & S.GRID_ID_MASK)
+                         for y in range(S.MAP_OFFSET, grid.height - S.MAP_OFFSET)
+                         for x in range(S.MAP_OFFSET, grid.width - S.MAP_OFFSET)}
+            if behaviors & DIVE_BEHAVIORS:
+                return "open"
+            return "script_no_go" if behaviors & WATER_BEHAVIORS else None
         if direction == rowe_map.DIR_NORTH:
             tiles = [(x, 0) for x in range(w)]
         elif direction == rowe_map.DIR_SOUTH:
@@ -2049,7 +2199,7 @@ class Player:
         else:
             tiles = [(w - 1, y) for y in range(h)]
         surf = "SURF" in self.field_moves()
-        return any(grid.passable(x, y, 0, (x, y), surf) for x, y in tiles)
+        return "open" if any(grid.passable(x, y, 0, (x, y), surf) for x, y in tiles) else "unreachable"
 
     @staticmethod
     def _stuck_key(here: tuple, hop: tuple, moves: frozenset) -> str:
@@ -2073,7 +2223,7 @@ class Player:
     def region(self) -> tuple:
         """(group, num, min reachable tile): where the player stands, down to the walkable area."""
         x, y, group, num = self.g.position()
-        return (group, num) + Grid(self.e).region((x, y), "SURF" in self.field_moves())
+        return (group, num) + self._grid().region((x, y), "SURF" in self.field_moves())
 
     def _after_cross(self, region: tuple, hop: tuple, crossed: tuple) -> None:
         """Remember what the crossing taught about this area: a hop w/ no path or warp is dead
@@ -2121,7 +2271,7 @@ class Player:
         edge holds a reachable tile, and every warp destination whose tile or a neighbour of it is
         reachable. Read off the live grid so NPCs and the party's field moves count."""
         x, y, *_ = self.g.position()
-        grid = Grid(self.e)
+        grid = self._grid()
         reach = set(grid.reachable((x, y), "SURF" in self.field_moves()))
         w, h = grid.width - 2 * S.MAP_OFFSET, grid.height - 2 * S.MAP_OFFSET
         edge = {rowe_map.DIR_NORTH: lambda t: t[1] == 0, rowe_map.DIR_SOUTH: lambda t: t[1] == h - 1,
@@ -2148,8 +2298,13 @@ class Player:
                 self._blocked.setdefault(region, set()).add(hop)
             if self._returned:
                 n = self._bounces[(region, hop)] = self._bounces.get((region, hop), 0) + 1
-                if n >= BOUNCE_STREAK:
-                    raise GoalExit(f"travel stuck: {n} round trips {list(region[:2])} <-> {list(hop)}, re-planning")
+                if n >= BOUNCE_STREAK and self.graph is not None:
+                    # the hop keeps leading straight back here: a repeated identical plan is a wrong
+                    # plan, not an exit. Mark the border dead for the session so the next pick and any
+                    # re-exec take another exit; travel_toward ends the run only when none is left.
+                    self.graph.cur_badges = self.g.badges()
+                    self.graph.block(region[:2], hop, self.field_moves(), reason="bounce")
+                    print(f"bounce block: {n} round trips {list(region[:2])} <-> {list(hop)}, border marked dead, next exit", flush=True)
             self._last_hop = None
         return self._blocked.get(region, set()) | self._stuck.get(region, set())
 
@@ -2164,7 +2319,7 @@ class Player:
         if not tier:
             return OLDALE
         x, y, _, _ = self.g.position()
-        grid = Grid(self.e)
+        grid = self._grid()
         # grid.width/height carry the MAP_OFFSET pad on each side; the border walk is measured
         # against the real map size, or east and south read farther than they are
         w, h = grid.width - 2 * S.MAP_OFFSET, grid.height - 2 * S.MAP_OFFSET
@@ -2191,7 +2346,12 @@ class Player:
         # the rest of the budget
         blocked = self._blocked_from(region) - {dest}
         moves = self.field_moves()
-        hop = self.graph.route(here, dest, blocked, moves) or self.graph.explore_hop(here, blocked, moves)
+        self.graph.cur_badges = self.g.badges()
+        route_hop = self.graph.route(here, dest, blocked, moves)
+        if route_hop is None and self.goal.get("mode") == "travel":
+            print(f"warn: no graph route {list(here)} -> {list(dest)} under moves {sorted(moves)} "
+                  f"badges {self.graph.cur_badges}, falling to explore", flush=True)
+        hop = route_hop or self.graph.explore_hop(here, blocked, moves)
         if hop is None and blocked:
             # a run-local block (the hop that led straight back here, an item detour that re-crossed
             # the border) never outranks the only graph route out of this map; retake it
@@ -2213,6 +2373,7 @@ class Player:
     def explore_step(self) -> None:
         here = self.g.position()[2:]
         moves = self.field_moves()
+        self.graph.cur_badges = self.g.badges()
         region = self.region()
         hop = self.graph.explore_hop(here, self._blocked_from(region), moves)
         if hop is None:
@@ -2293,7 +2454,7 @@ class Player:
         map 24) can never spawn a wild battle, so the grind routes to the nearest reachable grass
         map instead of idling the frame on a map that has none."""
         x, y, _, _ = self.g.position()
-        grid = Grid(self.e)
+        grid = self._grid()
         reach = grid.reachable((x, y), "SURF" in self.field_moves())
         has_grass = any(t in reach for t in grid.tiles_with_id(TALL_GRASS_ID))
         target = here if has_grass else (self._reachable_grass_map(here) or here)
@@ -2337,7 +2498,7 @@ class Player:
         x, y, group, num = self.g.position()
         here = (group, num)
         surf = "SURF" in self.field_moves()
-        reach = Grid(self.e).reachable((x, y), surf)
+        reach = self._grid().reachable((x, y), surf)
         out = []
         for bx, by, flag in rowe_map.item_balls(self.e):
             if not flag or self.g.flag(flag) or (here, bx, by) in self._item_skip:
@@ -2432,7 +2593,7 @@ class Player:
         if self.goal.get("mode") == "travel":
             self.travel_toward(tuple(self.goal.get("to", ())))
             return
-        if self.goal.get("mode") == "explore":
+        if self.goal.get("mode") in ("explore", "sevii"):
             self.explore_step()
             return
         if self.goal.get("mode") == "gym":
@@ -2457,7 +2618,7 @@ class Player:
         # the hop that brought the walk here worked; a PACE key stepping back over the border
         # must not read as a dead door and retire the route from the town
         self._last_hop = None
-        grid = Grid(self.e)
+        grid = self._grid()
         # only grass this walkable area reaches: Route 104 holds grass on both sides of the
         # Woods, and a pick across the split fails walk_to, then a PACE key at the border
         # steps back into town and retires the route's own hop
@@ -2665,7 +2826,8 @@ class Player:
             states_dir = os.path.dirname(self.state_path)
             self.goal = read_goal(os.path.join(states_dir, "goal.json"))
             self.graph = map_graph.MapGraph(os.path.join(states_dir, "map_graph.json"),
-                                            world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs())
+                                            world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs(),
+                                            script=script_decode.script_edges(), flags=self._graph_flags())
             self._stuck_hits = self._load_stuck_hits(os.path.join(states_dir, "stuck_hits.json"))
         # points accrue at trainer-level milestones and the supervisor relaunches often enough
         # that a launch-time spend keeps them from piling up unspent; once per process, since
@@ -2694,6 +2856,9 @@ class Player:
                     self._wedge_sig = None
                     self._switch_active = None  # new battle, let this battle's lead try a switch
                     self._wild_switched = False
+                    self._start_items = {}
+                    self._avoid_slots = set()
+                    self._freezes = 0
                 self.battle_step()
                 streak = self.stall_check(self.battle_signature(), streak)
             else:
@@ -2720,7 +2885,8 @@ class Player:
                     # the Mart next door is the destination anyway
                     center_trip = len(low) >= 2 or (low and self.shopping) or self._retreat_warranted(party)
                     mon = party[0]
-                    self.say(f"{self.wins}/{self.battles} won, {self.caught} caught, {mon.nickname} L{mon.level} {mon.hp}/{mon.max_hp} exp {mon.experience}, balls {balls}")
+                    ferry = " ".join(f"{f:03X}:{int(self.g.flag(f))}" for f in FERRY_FLAGS)
+                    self.say(f"{self.wins}/{self.battles} won, {self.caught} caught, {mon.nickname} L{mon.level} {mon.hp}/{mon.max_hp} exp {mon.experience}, balls {balls}, badges {self.g.badges()}, map {self.g.position()[2:]}, ferry {ferry}")
                     self.dismiss_text()
                     if center_trip:
                         # the bag's HP items cover the bench first, so the Center trip only fires

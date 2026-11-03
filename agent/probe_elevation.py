@@ -7,7 +7,7 @@ Drives the Fortree gym door-mat state out of the gym, east into Route 120 to the
 west end (elevation 4 land onto the elevation 7 deck), then surfs the upper pool back to that
 end and presses from the water onto it and onto a plain elevation-3 bank.
 
-    probe_elevation.py [SNAPSHOT]     -> states/probe/elevation_probe.jsonl
+    probe_elevation.py [SNAPSHOT]     -> states/fixtures/elevation_probe.jsonl
 """
 import json
 import os
@@ -21,9 +21,9 @@ import rowe_symbols as S
 from nav import Grid
 from routines import Errands
 
-SNAPSHOT = sys.argv[1] if len(sys.argv) > 1 else "states/probe/fortree_entry_beaten.ss"
-SRC = "states/probe/elev_src.ss"
-OUT = "states/probe/elevation_probe.jsonl"
+SNAPSHOT = sys.argv[1] if len(sys.argv) > 1 else "states/fixtures/fortree_entry_beaten.ss"
+SRC = "states/fixtures/elev_src.ss"
+OUT = "states/fixtures/elevation_probe.jsonl"
 GYM, FORTREE, ROUTE120 = (12, 1), (0, 4), (0, 35)
 UP, DOWN, LEFT, RIGHT = (0, -1), (0, 1), (-1, 0), (1, 0)
 

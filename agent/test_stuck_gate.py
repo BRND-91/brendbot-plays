@@ -47,13 +47,13 @@ def main() -> None:
         g2 = MapGraph(path + ".2")
         g2.observe(A, [WARP])
         p2 = _player(g2)
-        p2._border_open = lambda here, hop: False
+        p2._border_open = lambda here, hop: "unreachable"
         p2._persist_blocked(A, WARP, "unreachable")
         assert g2.explore_hop(A, field_moves=FM) is None, "a closed border gates immediately"
         g2b = MapGraph(path + ".2b")
         g2b.observe(A, [WARP])
         p2b = _player(g2b)
-        p2b._border_open = lambda here, hop: True
+        p2b._border_open = lambda here, hop: "open"
         p2b._persist_blocked(A, WARP, "unreachable")
         assert g2b.explore_hop(A, field_moves=FM) == WARP, "an open border unreachable from one region is not gated"
         for _ in range(STUCK_GATE):
@@ -62,8 +62,13 @@ def main() -> None:
         # a warp hop is closed when every warp tile to it is solid rock w/ no door behavior
         # (Route 110's wall warp at (45, 6)), open when a warp sits on a door or cave-mouth tile
         p2c = _player(MapGraph(path + ".2c"))
-        assert p2c._border_open(A, WARP) is False, "the wall warp into (24, 106) reads open"
-        assert p2c._border_open((0, 19), (24, 11)) is True, "the cave mouths into (24, 11) read closed"
+        assert p2c._border_open(A, WARP) == "no_warp", "the wall warp into (24, 106) reads open"
+        assert p2c._border_open((0, 19), (24, 11)) == "open", "the cave mouths into (24, 11) read closed"
+        # a DIVE connection fires from a diveable tile, never a border tile. Route 105 (0, 20) is
+        # surf-only ocean (behavior 0x15) with no diveable tile, so its dormant dive header to the
+        # underwater (0, 55) is shut; the pre-fix EAST-border fallthrough read the ocean edge as
+        # open and the router re-handed the phantom dive every run (grind bounce at tile 20, 68)
+        assert p2c._border_open((0, 20), (0, 55)) == "script_no_go", "the phantom dive into (0, 55) reads open"
 
         # a gated border is not a corridor: a frontier reachable only through it stays
         # unreachable, so neither explore nor route may hand back the gate as the hop

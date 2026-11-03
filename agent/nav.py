@@ -33,6 +33,10 @@ WATER_BEHAVIORS = frozenset(range(0x10, 0x16)) - {WATERFALL}
 # underwater map is the inverse test (MetatileBehavior_IsUnableToEmerge over a fixed dive-warp
 # coordinate), not a diveable tile, so dive_tiles resolves submerge spots only.
 DIVE_BEHAVIORS = frozenset({0x11, 0x12, 0x14})  # SEMI_DEEP_WATER, DEEP_WATER, SOOTOPOLIS_DEEP_WATER
+# MetatileBehavior_IsUnableToEmerge: seabed a B-press cannot surface from. ROWE keeps vanilla's
+# MB_NO_SURFACING (0x19) and MB_SEAWEED_NO_SURFACING (0x2A); every other reachable underwater
+# tile opens the "Would you like to surface?" yes/no prompt.
+NO_SURFACE_BEHAVIORS = frozenset({0x19, 0x2A})
 # MB_*BRIDGE* behaviors (metatile_behaviors.h): a deck over water. The game refuses a step
 # off the deck onto the water beside it and a surfer's step up onto it, so a route crosses
 # a bridge end to end or stays in the water under it (Route 120 jammed pressing off the deck)
@@ -217,6 +221,13 @@ class Grid:
             tile = (tile[0], tile[1] - 1)
         return tile
 
+    def _descend_bottom(self, tile: tuple) -> tuple:
+        """Where surfing down the fall that enters at `tile` ends: the first tile below the run
+        of waterfall tiles. Descent carries no tool, the current forces the ride down."""
+        while self._is_waterfall(*tile):
+            tile = (tile[0], tile[1] + 1)
+        return tile
+
     def _ride(self, tile: tuple):
         """Where a surfer who enters the current at `tile` comes to rest: the first tile along the
         flow that is not itself a current, or the first tile past the map edge when the flow
@@ -268,10 +279,16 @@ class Grid:
                 if self.passable(*land, carried, origin, surf):
                     yield land, d
             elif self._is_waterfall(*adj):
-                # the ride goes up only, from the water under the fall, w/ the tool in the bag
-                if surf and self.climb and d == (0, -1) and self._is_water(*cur):
-                    land = self._climb_top(adj)
-                    if self.passable(*land, carried, origin, surf):
+                # from water at the edge of a fall: Up climbs the run with the tool in the bag, Down
+                # is a free ride the current forces down it. Each lands on the first non-fall tile.
+                if surf and self._is_water(*cur):
+                    if self.climb and d == (0, -1):
+                        land = self._climb_top(adj)
+                    elif d == (0, 1):
+                        land = self._descend_bottom(adj)
+                    else:
+                        land = None
+                    if land is not None and self.passable(*land, carried, origin, surf):
                         yield land, d
             elif self.passable(*adj, carried, origin, surf) and not self._step_refused(cur, adj, d):
                 # a surfer carrying the water's height off a multi-level tile is still surfing
@@ -342,6 +359,18 @@ class Grid:
             return []
         here = [t for t in self.reachable(start, surf)
                 if self._behavior(self.cell(*t) & S.GRID_ID_MASK) in DIVE_BEHAVIORS]
+        return sorted(here, key=lambda t: abs(t[0] - start[0]) + abs(t[1] - start[1]))
+
+    def emerge_tiles(self, start: tuple, surf: bool = True) -> list:
+        """Reachable tiles that surface on a B-press, nearest to start first. Warp tiles drop out
+        so the goal is never the back-warp that would walk off the map, and the two
+        MetatileBehavior_IsUnableToEmerge behaviors drop out so the surface prompt actually opens.
+        Empty when the tileset is unknown."""
+        if self._behavior is None:
+            return []
+        here = [t for t in self.reachable(start, surf)
+                if t not in self.warp_tiles
+                and self._behavior(self.cell(*t) & S.GRID_ID_MASK) not in NO_SURFACE_BEHAVIORS]
         return sorted(here, key=lambda t: abs(t[0] - start[0]) + abs(t[1] - start[1]))
 
     def path(self, start: tuple, goal: tuple, surf: bool = False) -> list | None:

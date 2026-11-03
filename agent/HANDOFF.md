@@ -45,7 +45,14 @@ The live grind rewrites `states/live.ss` while it runs, so the live-save sha and
 - Verification: `test_warp_approach` on the frozen `states/fixtures/evergrande_0_8.ss` asserts `take_warp((16,12))` no longer stalls pinned on the start tile. Red-capability: pre-fix it returned `stuck` with the avatar unmoved. pytest 125.
 - Confirmed (`2e1fa67`): the full leg `(0,8) -> (16,12)` drives through the executor loop on goal `travel (16,12)`, `take_warp` presses UP into door `(27,48)` and the map changes `(0,8) -> (16,12)` (`goal reached: arrived at map [16, 12]`), 0 battles on the clean run (`probe_vr_full_leg.py`, `probe_endgame_recommend.py`). `test_vr_door_press` asserts the map change from the frozen `states/fixtures/vr_door_27_49.ss` pre-press fixture; red-capability is the pre-fix `stuck` with the map unchanged at `(0,8)`.
 - Planner chain (`2e1fa67`): `recommend` advances `ENDGAME_CHAIN = [(0,8),(16,12),(16,10),(25,60)]` to the first map not in `graph.visited` with a walkable `graph.route`, so arrival at `(0,8)` emits `travel (16,12)` and each hall drops out once visited. `test_planner` pins `(0,8)->travel (16,12)` then `(16,12)->travel (16,10)` on a world-backed graph. pytest 126. Frozen `states/fixtures/vr_entry_16_12.ss` holds the arrival state for the next leg.
-- Next: `(16,12)` through Victory Road toward `(16,10)` then `(25,60)`; the League/Elite-Four handling at `(25,60)` is still to build. ENDGAME_PLAN segment 3: `(16,12)` is the entry from the bottom of the city, `(16,10)`/`(18,5)` the League-side exit.
+- Next: the city->`(16,10)` leg, door `(18,5)` up north past the fall. `(16,12)` is a spur, not a step toward `(16,10)` (measurement below). ENDGAME_PLAN segment 3: `(16,12)` is the entry from the bottom of the city, `(16,10)`/`(18,5)` the League-side exit.
+
+## Victory Road interior, Phase 1 measurement
+
+- The only Victory Road door reachable from Ever Grande City is `(27,48)->(16,12)`. Control on `states/fixtures/evergrande_0_8.ss` from stand `(0,67)`: `Grid.reachable` with Surf and Waterfall-Tool climb reaches 414 tiles and exactly one warp tile, `(27,48)`; climb off reaches 222 and no warp tile. The League-side door `(18,5)->(16,10)` and both underwater doors `(18,41)`/`(18,27)->(24,43)` are unreachable from the surface either way.
+- `(16,12)` is a one-way spur. It reaches `(16,13)` and back to `(0,8)`, nothing else. Inside `(16,13)` the forward League warps `(5,1)->(25,60)` and `(9,1)->(25,25)` sit at row 1 behind a wall the entry pool cannot climb to: `reachable` from the warp-in tile `(2,6)` with Surf and climb is 77 tiles both climb states and holds neither warp tile nor a neighbour, so `take_warp((25,25))` returns `stuck` with the map unchanged. Landing back at `(0,8)` from the `(16,12)` door drops at the fall-top `(27,49)`, a pocket whose only reachable exit is the `(16,12)` door, so `_landing_exits` reports `[[16,12]]`, the hop dead-ends, and the walk bounces `(16,12)<->(0,8)` to the `BOUNCE_STREAK` re-plan.
+- So `planner.ENDGAME_CHAIN = [(0,8),(16,12),(16,10),(25,60)]` cannot thread: `(16,12)` is not a stepping stone to `(16,10)`, and `(16,10)` is not reachable from the city surface at all. The open build item is the city->`(16,10)` crossing (how `(18,5)` is actually reached past the fall), not a break inside `(16,12)`.
+- Evidence: `probe_vr_interior.py` drives the leg on a `/tmp` copy of `states/fixtures/vr_entry_16_12.ss` through the real executor loop, tracing each `take_warp` before/after. Frozen `states/fixtures/vr_16_13.ss` holds the `(16,13)` pocket state.
 
 ## Sootopolis gym `(15,0)`
 
@@ -94,3 +101,20 @@ The live grind rewrites `states/live.ss` while it runs, so the live-save sha and
 ## Tests
 
 - `pytest` from rowe-agent: 124 passed (the 2 new `test_endgame_halt.py` badge-8 tests added to the prior 122), with the 3 `test_battle_wedge_route126.py` move-list tests, the 4 `test_nopp_loop.py` selection-script tests (B-at-6, steer+confirm-at-3, the mid-intro toggle, and `test_comm_wait_leaves_opening_box_with_b_never_mashes_the_open_key`), the 3 `test_nopp_grid.py` emulator replays off `seaking_nopp_grid.ss` and `seaking_seel_nopp.ss`, the 2 `test_party_menu_faint.py` forced-replacement tests, and the 3 `test_throw_ball.py` bag-guard tests among them. Red-capability: with `_comm_action` stubbed to `return ""` the 4 `test_nopp_loop.py` and 3 `test_nopp_grid.py` tests all fail. Source: `.venv/bin/python -m pytest -q` this run. `test_lead.py` and `test_retreat.py` are script-style (run directly, `python test_lead.py` prints `ok`); the overworld PP-depletion heal pin lives in `test_lead.py`.
+
+## Open: (25,60) identity conflict
+The Seagallop dock script on (2,3) warps to (25,60) via warpteleport2 (landing x=7
+y=11, gate flag 0xCD1, multichoice case 0). An earlier map read treated (25,60) as
+the Pokemon Center 2F link room. Both reads cannot be right; resolve which before
+talk_warp targets (25,60). Not chased here.
+
+## Gate capability version (expect a one-run re-probe)
+A gate now carries `EXECUTOR_CAP_VERSION` (`map_graph.py`), bumped when a crossing primitive lands
+(an NPC-talk warp, a descent link, the live-grid border read). `_gate_shut` reads a gate recorded
+below the current version as open, so the walker retries that crossing once and a fresh failure
+re-records it at the current version. Every gate persisted before this commit loads as version 0,
+so the first grind/drive run after it reopens every recorded gate once and spends time re-walking
+borders that are still dead. That one pass is expected, not a regression; by the end of it each
+still-dead border is re-gated at the current version and routing settles. `block()` also records a
+`reason` (`no_warp`, `unreachable`, `script_no_go` from `_border_open`, `stuck`, `bounce`) so a
+later purge is a query over reasons rather than a hand audit.

@@ -11,12 +11,12 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rowe_rom
 import rowe_symbols as S
-from play import (CORE_MARGIN_FLOOR, FLEX_MARGIN, LEVEL_CUTOFF, Player, best_swap, core_margin, flex_slot, foe_types, mon_profile,
-                  team_score, wanted_types)
+from play import (CORE_MARGIN_FLOOR, FLEX_MARGIN, LEVEL_CUTOFF, Player, SwapLedger, best_swap, core_margin, flex_slot, foe_types,
+                  mon_profile, score_flex, team_score, wanted_types)
 
-NORMAL, FLYING, WATER, ICE = 0, 2, 11, 15
-GREEDENT, MARILL, AZUMARILL, LAPRAS, MAGIKARP = 820, 183, 184, 131, 129  # Lapras: Atk 85, SpA 85 in this ROM
-TACKLE, WATER_GUN, ICE_BEAM, SPARK = 33, 55, 58, 209
+NORMAL, FLYING, WATER, ICE, GRASS, POISON = 0, 2, 11, 15, 12, 3
+GREEDENT, MARILL, AZUMARILL, LAPRAS, MAGIKARP, PIDGEY, ODDISH = 820, 183, 184, 131, 129, 16, 43  # Lapras: Atk 85, SpA 85 in this ROM
+TACKLE, WATER_GUN, ICE_BEAM, SPARK, GUST, GIGA_DRAIN = 33, 55, 58, 209, 16, 202
 NO_IVS = (0, 0, 0, 0, 0, 0)
 
 
@@ -159,6 +159,58 @@ def main() -> None:
         p.wanted = frozenset({WATER})
         p.do_pc_swap()
         assert len(p.errands.calls) == 1, "a Water catch on a Water-wanting party is exempt from the cutoff"
+
+    # flex scoring at the cap: the flex slot asks which mon the grind makes the better counter to the
+    # next leader, so a low Grass/Poison counter still beats a Rock-weak flyer into Roxanne while a
+    # higher one of the same type wins on the smaller grind cost.
+    assert rowe_rom.species(PIDGEY).types == (NORMAL, FLYING) and rowe_rom.species(ODDISH).types == (GRASS, POISON)
+    roxanne_now = foe_types(rowe_rom.leader_build("Roxanne", 0))
+    pidgey = mon_profile(Mon(0, PIDGEY, 15, [GUST]), 15, NO_IVS)
+    oddish = mon_profile(Boxed(0, ODDISH, 4, [GIGA_DRAIN]), 15, NO_IVS)
+    assert oddish.attack_types == frozenset({GRASS}), f"a special Grass move credits Grass, got {oddish}"
+    assert score_flex(pidgey, 15, 15, roxanne_now) == 0, "a Rock-weak flyer counters Roxanne for nothing"
+    assert score_flex(oddish, 4, 15, roxanne_now) == 2, "a L4 Grass counter clears the flex margin once grown to the cap"
+    assert score_flex(oddish, 15, 15, roxanne_now) == 4, "the same counter at the cap pays no grind cost"
+
+    with tempfile.TemporaryDirectory() as d:
+        state = os.path.join(d, "route101.ss")
+        ledger = os.path.join(d, "swaps.json")
+        strong = [Mon(0, MARILL, 15, [WATER_GUN]), Mon(1, LAPRAS, 15, [ICE_BEAM]), Mon(2, GREEDENT, 15, [SPARK]),
+                  Mon(3, GREEDENT, 15, [TACKLE]), Mon(4, GREEDENT, 15, [TACKLE])]
+        # core closed on the ledger (a swap four visits back), so the flex path is what runs
+        json.dump({"visits": 5, "last_core_visit": 5}, open(ledger, "w"))
+        pidgey_mon = Mon(5, PIDGEY, 15, [GUST])
+        low, high = Boxed(0, ODDISH, 4, [GIGA_DRAIN]), Boxed(1, ODDISH, 15, [GIGA_DRAIN])
+        g = G(list(strong) + [pidgey_mon], [low, high], 0)
+        p = player(g, state)
+        p.goal = {"mode": "grind", "map": [0, 16], "cap": 15}
+        team = [mon_profile(m, 15, NO_IVS) for m in g.party()]
+        assert flex_slot(team, p.scoring_builds()[0]) == 5, "the Rock-weak flyer is the flex slot"
+        p.do_pc_swap()
+        assert p.errands.calls == [(5, 1)], f"Pidgey out of the flex slot, the L15 Grass/Poison in over the L4, got {p.errands.calls}"
+        assert pidgey_mon not in g.party() and high in g.party(), "the flyer is gone and the cap-level counter is in"
+        led = json.load(open(ledger))
+        assert led["flex_locked"] == {str(high.personality): 0}, led
+        lg = SwapLedger(ledger)
+        assert lg.flex_hold(high.personality, 0) and not lg.flex_hold(high.personality, 1), "the hold lifts once Roxanne is beaten"
+
+        # the churn guard gates do_pc_swap: with the flyer flex-locked for Roxanne the swap is held,
+        # without the lock the same board swaps, so the lock is what blocks it
+        def board():
+            fresh = [Mon(i, m.species, 15, list(m.moves)) for i, m in enumerate(strong)] + [Mon(5, PIDGEY, 15, [GUST])]
+            return G(fresh, [Boxed(0, ODDISH, 15, [GIGA_DRAIN])], 0), fresh[5]
+        g2, locked_flyer = board()
+        json.dump({"visits": 5, "last_core_visit": 5, "flex_locked": {str(locked_flyer.personality): 0}}, open(ledger, "w"))
+        p = player(g2, state)
+        p.goal = {"mode": "grind", "map": [0, 16], "cap": 15}
+        p.do_pc_swap()
+        assert p.errands.calls == [], f"a flex-locked flyer is held before Roxanne is beaten, got {p.errands.calls}"
+        g3, _ = board()
+        json.dump({"visits": 5, "last_core_visit": 5}, open(ledger, "w"))
+        p = player(g3, state)
+        p.goal = {"mode": "grind", "map": [0, 16], "cap": 15}
+        p.do_pc_swap()
+        assert p.errands.calls == [(5, 0)], f"the same board with no lock swaps the flyer out, got {p.errands.calls}"
     print("ok")
 
 

@@ -616,23 +616,28 @@ def planner_sends_a_capped_party_to_the_gym():
     import tempfile
     import map_graph
     import planner
+    import rowe_rom
     with tempfile.TemporaryDirectory() as d:
         # recommend reads these off disk through module globals; point them at the tempdir so a
         # live run's gym_closed/grind_blocked cannot poison the planning logic under test
         planner.GYM_CLOSED = os.path.join(d, "gym_closed.json")
         planner.BLOCKED = os.path.join(d, "grind_blocked.json")
-        g = map_graph.MapGraph(os.path.join(d, "g.json"))
+        g = map_graph.MapGraph(os.path.join(d, "g.json"), world=rowe_rom.world_edges(),
+                               passthrough=rowe_rom.passthroughs())
         party = [{"level": 16, "moves": [{"power": 40, "pp": 10}]} for _ in range(6)]
         # [0, 3] is the town linking into the Rustboro gym, so it is the nearest unbeaten gym here
         goal, _ = planner.recommend({"party": party, "map": [0, 3], "badges": 0}, g)
         gym = {"mode": "gym", "map": [11, 3], "stand": [5, 3], "badges": 0}
+        # one badge in: ROWE reads the beaten gym off its own flag, not the count, so Rustboro
+        # (flag 0) is marked down the way live status.json carries it
+        beaten = [True] + [False] * 7
         assert goal == gym, f"capped party not sent to the Rustboro gym: {goal}"
         low = party[:5] + [{"level": 15, "moves": [{"power": 40, "pp": 10}]}]
         goal, _ = planner.recommend({"party": low, "map": [0, 18], "badges": 0}, g)
         assert goal["mode"] == "grind" and goal["cap"] == 16, f"under-cap party not held on a grind: {goal}"
         goal, _ = planner.recommend({"party": party, "map": [11, 3], "badges": 0}, g)
         assert goal == gym, f"at the gym the goal stays the gym fight, got {goal}"
-        goal, _ = planner.recommend({"party": party, "map": [11, 3], "badges": 1}, g)
+        goal, _ = planner.recommend({"party": party, "map": [11, 3], "badges": 1, "badge_flags": beaten}, g)
         assert goal["mode"] == "grind" and goal["cap"] == 21, f"one badge must re-grind to cap 21, got {goal}"
         # Rustboro beaten, so the grind anchors on the next gym; with no walked route it falls back
         # to the overworld map nearest that anchor
@@ -640,7 +645,7 @@ def planner_sends_a_capped_party_to_the_gym():
         # Rustboro walked w/ Route 104 and Route 116 beside it: the grind goes to a route, never the gym
         g.observe((0, 3), [(0, 19), (0, 31)])
         g.observe((0, 19), [(0, 3)])
-        goal, _ = planner.recommend({"party": party, "map": [11, 3], "badges": 1}, g)
+        goal, _ = planner.recommend({"party": party, "map": [11, 3], "badges": 1, "badge_flags": beaten}, g)
         assert goal["map"] == [0, 19], f"grind from the gym must land on the nearest walked route, got {goal['map']}"
         goal, _ = planner.recommend({"party": low, "map": [0, 3], "badges": 0}, g)
         assert goal["map"] == [0, 19], f"grind from a town must leave for a route, got {goal['map']}"
@@ -835,7 +840,7 @@ def travel_counts_a_landing_off_the_hop_as_a_miss():
     import play
     e = _load("city_gate.ss")
     ex = play.Player(e, play.NullStreamer(), ledger_path="/tmp/rowe-smoke-caught.json")
-    ex.errands.take_warp = lambda dest, surf=False, rank=None: ex.errands.cross_edge(rowe_map.DIR_EAST)
+    ex.errands.take_warp = lambda dest, surf=False, rank=None, tools=frozenset(): ex.errands.cross_edge(rowe_map.DIR_EAST)
     with tempfile.TemporaryDirectory() as d:
         ex.graph = map_graph.MapGraph(os.path.join(d, "map_graph.json"))
         ex.graph.observe((1, 31), [(0, 2), (0, 33)])
