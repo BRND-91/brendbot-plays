@@ -77,6 +77,16 @@ def test_take_warp_crosses_to_the_route_side():
     assert _onward_targets(w, h) & reach, "crossed into the dead-end pocket, not the route side"
 
 
+def test_heal_at_exits_the_front_door():
+    # heal_at leaves through leave_by_warp, which ranks the exit by step-off region; the hot-spring
+    # back door is a dead-end pocket, so a healed party must come out the front mat, one tile below
+    # the front door. Pre-fix leave_by_warp took warp_to's first header warp, the pocket door
+    e, p = _player()
+    status = p.errands.heal_at((0, 12), (4, 5))
+    assert tuple(p.g.position()[2:]) == (0, 12), f"heal_at did not reach town (0,12), status {status!r} at {p.g.position()}"
+    assert tuple(p.g.position()[:2]) == FRONT_STEP, f"exited the hot-spring pocket, at {p.g.position()[:2]} want {FRONT_STEP}"
+
+
 def test_hotspring_pocket_is_walled_from_the_front_door():
     # the pocket is genuinely separate from the front-door region, so a bogus merge is not what made
     # the two doors rank alike; the trap was the blocked-pad rank, not a pocket reaching town

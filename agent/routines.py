@@ -41,6 +41,50 @@ def route_state_matches(live: tuple, recorded: tuple) -> bool:
     return not any(recorded[1]) or live[1] == recorded[1]
 
 
+def landing_rank(hop: tuple, nxt: tuple | None, surf: bool = False):
+    """(rank, w, h) for a crossing into `hop`, off its ROM layout, or None when unreadable.
+    rank(landing_tile) is (0, -region size) when the tile's region under `surf` reaches
+    hop's crossing toward `nxt` (or no such crossing is known), (1, -size) when it does
+    not, (2, 0) off the map. A pocket (Route 104's east cove, Petalburg's pond-locked
+    northwest) is small and reaches nothing, so it ranks behind the map proper. A surf
+    crossing lands on water, so its region is read w/ surf, else every bank is a pocket."""
+    cells = rowe_rom.map_cells(*hop)
+    if cells is None:
+        return None
+    w, h, _ = cells
+    grid = Grid.from_cells(*cells)
+    grid._behavior = rowe_rom.metatile_behavior(*hop)
+    edge_rows = {rowe_map.DIR_NORTH: [(x, 0) for x in range(w)], rowe_map.DIR_SOUTH: [(x, h - 1) for x in range(w)],
+                 rowe_map.DIR_WEST: [(0, y) for y in range(h)], rowe_map.DIR_EAST: [(w - 1, y) for y in range(h)]}
+    targets = set()
+    for d, dest in rowe_rom.map_connections(*hop):
+        if dest == nxt:
+            targets.update(edge_rows.get(d, []))
+    for x, y, dest in rowe_rom.map_warps(*hop):
+        if dest == nxt:
+            targets |= {(x, y), (x, y + 1), (x, y - 1), (x + 1, y), (x - 1, y)}
+    memo = {}
+
+    def rank(landing: tuple) -> tuple:
+        # a door or stair warp lands on a pad metatile that reads blocked; the player steps off it
+        # onto an orthogonal neighbour, so rank the best tile actually stood on, the pad or a
+        # neighbour, else a front-mat door scores (2, 0) and loses to a dead-end pocket next door
+        best = (2, 0)
+        for tile in (landing, (landing[0], landing[1] + 1), (landing[0], landing[1] - 1),
+                     (landing[0] + 1, landing[1]), (landing[0] - 1, landing[1])):
+            c = grid.cell(*tile)
+            if c & S.GRID_ID_MASK == S.GRID_UNDEFINED or c & S.GRID_BLOCKED:
+                continue
+            region = grid.region(tile, surf)
+            if region not in memo:
+                reach = grid.reachable(tile, surf)
+                memo[region] = (0 if not targets or not targets.isdisjoint(reach) else 1, -len(reach))
+            if memo[region] < best:
+                best = memo[region]
+        return best
+    return rank, w, h
+
+
 class Errands:
     def __init__(self, emu: eb.Emu, run: Callable[[int, int], None], log: Callable[[str], None] = print):
         self.e = emu
@@ -174,17 +218,19 @@ class Errands:
         return "map_changed" if self._landed(before) else "stuck"
 
     def leave_by_warp(self, dest: tuple) -> str:
-        """Step down onto an exit mat (bottom-row warp) that leads to dest."""
-        w = rowe_map.warp_to(self.e, *dest)
-        if w is None:
-            return "no_warp"
-        r = self.nav.walk_to((w.x, w.y - 1))
-        if r != "arrived":
-            return r
-        before = self.map_id()
-        self.run(24, eb.KEY_DOWN)
-        self.run(120, 0)
-        return "map_changed" if self._landed(before) else "stuck"
+        """Leave the current building through the warp back to `dest`, ranked so the biggest
+        landing region wins. Several warps can share the town id (Lavaridge's front mat and its
+        hot-spring back door both read (0,12)); unranked warp_to took the first in the header,
+        the dead-end pocket, and the walk bounced the town border. take_warp scores the step-off
+        tile, so the real front door outranks the pocket."""
+        lr = landing_rank(dest, None)
+        warp_rank = None
+        if lr is not None:
+            rank, dest_warps = lr[0], rowe_rom.map_warps(*dest)
+
+            def warp_rank(wp: rowe_map.Warp) -> tuple:
+                return rank(dest_warps[wp.dest_warp][:2]) if wp.dest_warp < len(dest_warps) else (2, 0)
+        return self.take_warp(dest, rank=warp_rank)
 
     def take_warp(self, dest: tuple, surf: bool = False, rank: Callable | None = None, tools=frozenset()) -> str:
         """Leave the current map through a warp to dest: "map_changed", "battle", "no_warp",

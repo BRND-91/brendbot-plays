@@ -31,7 +31,7 @@ import rowe_map  # noqa: E402
 import rowe_symbols as S  # noqa: E402
 import script_decode  # noqa: E402
 from nav import DIVE_BEHAVIORS, Grid, ITEM_WATERFALL_TOOL, Navigator, WATER_BEHAVIORS  # noqa: E402
-from routines import Errands  # noqa: E402
+from routines import Errands, landing_rank  # noqa: E402
 from rowe_state import GameState  # noqa: E402
 from stream_sink import FrameStreamer  # noqa: E402
 
@@ -2012,47 +2012,7 @@ class Player:
         return grid
 
     def _landing_rank(self, hop: tuple, nxt: tuple | None, surf: bool = False):
-        """(rank, w, h) for a crossing into `hop`, off its ROM layout, or None when unreadable.
-        rank(landing_tile) is (0, -region size) when the tile's region under `surf` reaches
-        hop's crossing toward `nxt` (or no such crossing is known), (1, -size) when it does
-        not, (2, 0) off the map. A pocket (Route 104's east cove, Petalburg's pond-locked
-        northwest) is small and reaches nothing, so it ranks behind the map proper. A surf
-        crossing lands on water, so its region is read w/ surf, else every bank is a pocket."""
-        cells = rowe_rom.map_cells(*hop)
-        if cells is None:
-            return None
-        w, h, _ = cells
-        grid = Grid.from_cells(*cells)
-        grid._behavior = rowe_rom.metatile_behavior(*hop)
-        edge_rows = {rowe_map.DIR_NORTH: [(x, 0) for x in range(w)], rowe_map.DIR_SOUTH: [(x, h - 1) for x in range(w)],
-                     rowe_map.DIR_WEST: [(0, y) for y in range(h)], rowe_map.DIR_EAST: [(w - 1, y) for y in range(h)]}
-        targets = set()
-        for d, dest in rowe_rom.map_connections(*hop):
-            if dest == nxt:
-                targets.update(edge_rows.get(d, []))
-        for x, y, dest in rowe_rom.map_warps(*hop):
-            if dest == nxt:
-                targets |= {(x, y), (x, y + 1), (x, y - 1), (x + 1, y), (x - 1, y)}
-        memo = {}
-
-        def rank(landing: tuple) -> tuple:
-            # a door or stair warp lands on a pad metatile that reads blocked; the player steps off it
-            # onto an orthogonal neighbour, so rank the best tile actually stood on, the pad or a
-            # neighbour, else a front-mat door scores (2, 0) and loses to a dead-end pocket next door
-            best = (2, 0)
-            for tile in (landing, (landing[0], landing[1] + 1), (landing[0], landing[1] - 1),
-                         (landing[0] + 1, landing[1]), (landing[0] - 1, landing[1])):
-                c = grid.cell(*tile)
-                if c & S.GRID_ID_MASK == S.GRID_UNDEFINED or c & S.GRID_BLOCKED:
-                    continue
-                region = grid.region(tile, surf)
-                if region not in memo:
-                    reach = grid.reachable(tile, surf)
-                    memo[region] = (0 if not targets or not targets.isdisjoint(reach) else 1, -len(reach))
-                if memo[region] < best:
-                    best = memo[region]
-            return best
-        return rank, w, h
+        return landing_rank(hop, nxt, surf)
 
     def _cross_to(self, here: tuple, hop: tuple, nxt: tuple | None = None) -> tuple:
         """Take the live connection to bordering map `hop`, else its warp. Returns (status,
