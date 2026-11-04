@@ -190,8 +190,9 @@ class Errands:
         """Leave the current map through a warp to dest: "map_changed", "battle", "no_warp",
         or "stuck". When several warps lead there (a cave with two mouths onto one route),
         `rank(warp)` -> (class, -landing region size) orders them biggest landing region
-        first, class 0 before the rest, and within a tie the farthest from the player goes
-        first, since the nearest is the one just arrived by. With surf the approach may cross
+        first, class 0 before the rest. Warps sharing a dest_warp land on one tile and are one
+        door, so only the first is tried, and within a rank tie the warp nearest the map's
+        bottom edge goes first, the exit mat's usual spot. With surf the approach may cross
         water (Petalburg Woods' pond is its only north link)."""
         ws = [w for w in rowe_map.warps(self.e) if (w.dest_group, w.dest_num) == dest]
         if not ws:
@@ -205,9 +206,14 @@ class Errands:
         ws = [w for w in ws if not grid.is_wall_warp(w.x, w.y)]
         if not ws:
             return "unreachable"
-        x, y, *_ = self.g.position()
-        ws.sort(key=lambda w: (rank(w) if rank else (0, 0), -(abs(w.x - x) + abs(w.y - y))))
+        ws.sort(key=lambda w: (rank(w) if rank else (0, 0), -w.y))
+        seen, doors = set(), []
         for w in ws:
+            if w.dest_warp in seen:
+                continue
+            seen.add(w.dest_warp)
+            doors.append(w)
+        for w in doors:
             r = self._step_into_warp(w, surf, tools)
             if r in ("map_changed", "battle"):
                 return r

@@ -2036,14 +2036,22 @@ class Player:
         memo = {}
 
         def rank(landing: tuple) -> tuple:
-            c = grid.cell(*landing)
-            if c & S.GRID_ID_MASK == S.GRID_UNDEFINED or c & S.GRID_BLOCKED:
-                return (2, 0)
-            region = grid.region(landing, surf)
-            if region not in memo:
-                reach = grid.reachable(landing, surf)
-                memo[region] = (0 if not targets or not targets.isdisjoint(reach) else 1, -len(reach))
-            return memo[region]
+            # a door or stair warp lands on a pad metatile that reads blocked; the player steps off it
+            # onto an orthogonal neighbour, so rank the best tile actually stood on, the pad or a
+            # neighbour, else a front-mat door scores (2, 0) and loses to a dead-end pocket next door
+            best = (2, 0)
+            for tile in (landing, (landing[0], landing[1] + 1), (landing[0], landing[1] - 1),
+                         (landing[0] + 1, landing[1]), (landing[0] - 1, landing[1])):
+                c = grid.cell(*tile)
+                if c & S.GRID_ID_MASK == S.GRID_UNDEFINED or c & S.GRID_BLOCKED:
+                    continue
+                region = grid.region(tile, surf)
+                if region not in memo:
+                    reach = grid.reachable(tile, surf)
+                    memo[region] = (0 if not targets or not targets.isdisjoint(reach) else 1, -len(reach))
+                if memo[region] < best:
+                    best = memo[region]
+            return best
         return rank, w, h
 
     def _cross_to(self, here: tuple, hop: tuple, nxt: tuple | None = None) -> tuple:
@@ -2321,13 +2329,22 @@ class Player:
                 self._blocked.setdefault(region, set()).add(hop)
             if self._returned:
                 n = self._bounces[(region, hop)] = self._bounces.get((region, hop), 0) + 1
-                if n >= BOUNCE_STREAK and self.graph is not None and not self._never_dead(region[:2], hop):
+                if n >= BOUNCE_STREAK and self.graph is not None:
                     # the hop keeps leading straight back here: a repeated identical plan is a wrong
-                    # plan, not an exit. Mark the border dead for the session so the next pick and any
-                    # re-exec take another exit; travel_toward ends the run only when none is left.
+                    # plan, not an exit.
                     self.graph.cur_badges = self.g.badges()
-                    self.graph.block(region[:2], hop, self.field_moves(), reason="bounce")
-                    print(f"bounce block: {n} round trips {list(region[:2])} <-> {list(hop)}, border marked dead, next exit", flush=True)
+                    if self._never_dead(region[:2], hop):
+                        # gating an interior's sole door re-walls the pocket, so hold a wild grind
+                        # here instead. the door stays open for a later run whose field moves reach
+                        # past it, and the stream runs on the grind rather than freezing on the door.
+                        self._bounces[(region, hop)] = 0
+                        print(f"bounce demote: {n} round trips {list(region[:2])} <-> {list(hop)}, sole door, grinding", flush=True)
+                        self.demote_to_grind(region[:2])
+                    else:
+                        # mark the border dead for the session so the next pick and any re-exec take
+                        # another exit; travel_toward ends the run only when none is left.
+                        self.graph.block(region[:2], hop, self.field_moves(), reason="bounce")
+                        print(f"bounce block: {n} round trips {list(region[:2])} <-> {list(hop)}, border marked dead, next exit", flush=True)
             self._last_hop = None
         return self._blocked.get(region, set()) | self._stuck.get(region, set())
 
@@ -2367,7 +2384,12 @@ class Player:
         # detour reads as a bounce by its neighbours and as a dead end by its exits, and once it
         # was blocked the route skipped it and the walk bounced through Mauville's side map for
         # the rest of the budget
+        goal_before = self.goal.get("mode")
         blocked = self._blocked_from(region) - {dest}
+        if goal_before != "grind" and self.goal.get("mode") == "grind":
+            # _blocked_from demoted a bounced sole door to a grind hold, so let the next tick
+            # dispatch that grind rather than crossing once more toward the abandoned goal
+            return
         moves = self.field_moves()
         self.graph.cur_badges = self.g.badges()
         route_hop = self.graph.route(here, dest, blocked, moves)
