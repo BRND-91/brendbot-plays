@@ -21,6 +21,10 @@ MOVE_COUNT = 827  # ROWE's table runs past vanilla: 819 Trailblaze on a Route 10
 ABILITY_NAMES_OFFSET = 0x416100  # gAbilityNames, 21 bytes per name; 1 Stench, 11 Water Absorb, 308 Evaporate (Slugma's second slot)
 ABILITY_NAME_LEN = 21
 ABILITY_SCAN_CAP = 512  # the table runs past 359 Tera Shell w/ no terminator; a row past the end decodes to junk no lookup names
+SPECIES_NAMES_OFFSET = 0x40B558  # gSpeciesNames, 13 bytes per name; id 1 Bulbasaur, 4 Charmander, 7 Squirtle
+SPECIES_NAME_LEN = 13
+REGION_MAP_ENTRIES = 0x08FBD474  # gRegionMapEntries, indexed by mapsec; entry 0 Littleroot Town
+REGION_MAP_ENTRY_SIZE = 8  # {u8 x, y, width, height; const u8* name}
 SPECIES_OFFSET = 0x4F710C      # gSpeciesInfo, 64 bytes per entry, ids are national dex numbers
 SPECIES_STRIDE = 0x40
 SPECIES_COUNT = 1959           # rows 1-1025 the dex, 1026-1500 zero, 1501-1958 ROWE's forms (League pools reach 1644)
@@ -76,6 +80,7 @@ MAPHDR_SCRIPTS = 0x8
 MAPHDR_CONNECTIONS = 0xC
 MAPHDR_MUSIC = 0x10
 MAPHDR_LAYOUT_ID = 0x12
+MAPHDR_REGION_SECTION = 0x14  # regionMapSectionId, the mapsec a map belongs to
 MAPHDR_MAP_TYPE = 0x17
 MAP_TYPE_UNDERWATER = 5
 MAP_TYPE_INDOOR = 8
@@ -90,7 +95,16 @@ STATIC_MOVEMENT = frozenset({0, 7, 8, 9, 10})  # movement types that hold the ti
 MAX_MAP_CELLS = 0x2800  # MAX_MAP_DATA_SIZE, the backup buffer every layout must fit
 # struct MapEvents: u8 objCount, warpCount, coordCount, bgCount; then obj*, warp*, coord*, bg*
 MAPEVENTS_WARP_COUNT = 0x1
+MAPEVENTS_BG_COUNT = 0x3
 MAPEVENTS_WARP_PTR = 0x8
+MAPEVENTS_BG_PTR = 0x10
+# struct BgEvent (12 bytes): s16 x, s16 y, u8 elevation, u8 kind, 2 pad, then a 4-byte union; for a
+# hidden item (kind 7) the union is u16 item, then u16 {flagId:12, quantity:4}
+BG_STRIDE = 12
+BG_HIDDEN_ITEM_KIND = 7
+# an item-ball object hands its item through setorcopyvar VAR_0x8000, <item> near the script top
+SETORCOPYVAR_OP = 0x1A
+VAR_RECEIVED_ITEM = 0x8000
 # struct WarpEvent (8 bytes): s16 x, s16 y, u8 elevation, u8 warpId, u8 mapNum, u8 mapGroup
 WARP_STRIDE = 8
 WARP_MAP_NUM = 0x6
@@ -308,6 +322,14 @@ def level_from_exp(species_id: int, exp: int) -> int:
         raise ValueError(f"growth rate out of range for species {species_id}: {growth}")
     entries = struct.unpack_from(f"<{EXP_TABLE_LEN}I", rom, EXP_TABLES_OFFSET + growth * EXP_TABLE_LEN * 4)
     return max(1, bisect.bisect_right(entries, exp) - 1)
+
+
+@lru_cache(maxsize=None)
+def species_name(species_id: int) -> str:
+    if not 0 <= species_id < SPECIES_COUNT:
+        raise ValueError(f"species id out of range: {species_id}")
+    o = SPECIES_NAMES_OFFSET + species_id * SPECIES_NAME_LEN
+    return _decode(_rom()[o:o + SPECIES_NAME_LEN])
 
 
 @lru_cache(maxsize=None)
@@ -555,6 +577,9 @@ def is_indoor(group: int, num: int) -> bool:
     return h is not None and _rom()[h + MAPHDR_MAP_TYPE] == MAP_TYPE_INDOOR
 
 
+MAP_DYNAMIC = (127, 127)  # a dynamic-warp header: the room script fills the real dest at runtime
+
+
 @lru_cache(maxsize=1)
 def world_edges() -> dict:
     """{(group, num): maps one connection, warp, or dive-warp away} for every map in the ROM, so
@@ -565,6 +590,7 @@ def world_edges() -> dict:
         for n in range(map_count(g)):
             dests = {d for _, d in map_connections(g, n)} | {d for *_, d in map_warps(g, n)}
             dests |= dive.get((g, n), set())
+            dests.discard(MAP_DYNAMIC)  # not an edge until a script edge names its target
             out.setdefault((g, n), set()).update(dests)
             for d in dests:
                 out.setdefault(d, set())
@@ -604,6 +630,44 @@ def is_mart(group: int, num: int) -> bool:
 def map_music(group: int, num: int) -> int | None:
     h = map_header(group, num)
     return None if h is None else struct.unpack_from("<H", _rom(), h + MAPHDR_MUSIC)[0]
+
+
+def map_section(group: int, num: int) -> int | None:
+    """regionMapSectionId, the mapsec a map belongs to; maps sharing a town or route share it."""
+    h = map_header(group, num)
+    return None if h is None else _rom()[h + MAPHDR_REGION_SECTION]
+
+
+def map_section_name(mapsec: int) -> str | None:
+    """Name string for a mapsec, read from gRegionMapEntries[mapsec].name. mapsec 0 is
+    Littleroot Town; a mapsec whose name pointer resolves off-ROM returns None."""
+    rom = _rom()
+    o = _fo(REGION_MAP_ENTRIES) + mapsec * REGION_MAP_ENTRY_SIZE
+    if not 0 <= o < len(rom) - REGION_MAP_ENTRY_SIZE:
+        return None
+    ptr = struct.unpack_from("<I", rom, o + 4)[0]
+    if not _in_rom(ptr):
+        return None
+    name = _decode(rom[_fo(ptr):_fo(ptr) + 40])
+    return name or None
+
+
+def map_sections() -> list:
+    """(mapsec, name) for every mapsec a map in the ROM references, so maps.mapsec joins to a name."""
+    seen = set()
+    for group in range(MAP_GROUP_COUNT):
+        for num in range(map_count(group)):
+            if map_header(group, num) is None:
+                continue
+            ms = map_section(group, num)
+            if ms is not None:
+                seen.add(ms)
+    out = []
+    for ms in sorted(seen):
+        name = map_section_name(ms)
+        if name:
+            out.append((ms, name))
+    return out
 
 
 def map_objects(group: int, num: int) -> list:
@@ -711,6 +775,57 @@ def wild_land_levels() -> dict:
         span = _wild_land_span(land)
         if span:
             out[(rom[h], rom[h + 1])] = span
+    return out
+
+
+def _wild_header_table() -> tuple:
+    """(start_offset, count) of gWildMonHeaders, the longest run of valid headers at the stride."""
+    rom = _rom()
+    best_start, best_run, o = 0, 0, 0
+    while o + WILD_HEADER_STRIDE <= len(rom):
+        if _wild_header_valid(o) and (o < WILD_HEADER_STRIDE or not _wild_header_valid(o - WILD_HEADER_STRIDE)):
+            run, q = 0, o
+            while _wild_header_valid(q):
+                run += 1
+                q += WILD_HEADER_STRIDE
+            if run > best_run:
+                best_start, best_run = o, run
+        o += 4
+    return best_start, best_run
+
+
+WILD_CATEGORY_COUNT = 7   # the widened header carries 7 WildPokemonInfo pointers after its 4-byte
+# head. Category 0 reads 12 slots and matches the proven land table; category 4 reads 10, the
+# vanilla fishing count. The other five are populated and read by the same per-slot validator;
+# their surface meaning (surf, rock smash, a day/night split) is not pinned to a name here.
+WILD_SLOT_CAP = 16
+
+
+@lru_cache(maxsize=1)
+def wild_encounters() -> list:
+    """[(group, num, category, slot, min_level, max_level, species)] for every encounter slot on
+    every map. category is the 0-6 WildPokemonInfo index. Slots are read while each validates as a
+    {1<=min<=max<=100, in-range species} row, so a short real table stops at its end and the read
+    never runs past the array into the next one."""
+    rom = _rom()
+    start, count = _wild_header_table()
+    out = []
+    for i in range(count):
+        h = start + i * WILD_HEADER_STRIDE
+        g, nm = rom[h], rom[h + 1]
+        ptrs = struct.unpack_from(f"<{WILD_CATEGORY_COUNT}I", rom, h + WILD_LAND_PTR)
+        for cat, p in enumerate(ptrs):
+            if not (p and _in_rom(p)):
+                continue
+            mons = struct.unpack_from("<I", rom, _fo(p) + WILD_MONS_PTR)[0]
+            if not _in_rom(mons):
+                continue
+            mo = _fo(mons)
+            for slot in range(WILD_SLOT_CAP):
+                mn, mx, sp = struct.unpack_from("<BBH", rom, mo + slot * 4)
+                if not (1 <= mn <= mx <= 100 and 0 < sp < SPECIES_COUNT):
+                    break
+                out.append((g, nm, cat, slot, mn, mx, sp))
     return out
 
 
@@ -891,6 +1006,350 @@ def leader_team(name: str, badges: int) -> list:
 def leader_build(name: str, badges: int) -> list:
     """[(species, level)] as fielded: leader_team's rows evolved to the stage each level allows."""
     return [(species_at_level(sp, lvl), lvl) for sp, lvl in leader_team(name, badges)]
+
+
+# the 8 Sevii-island leaders giving badges 9-16 (flags rowe_symbols.JOHTO_BADGE01 onward); their
+# gTrainers structs run contiguously from Falkner's at TRAINER_STRUCT_SIZE steps, in this order
+SEVII_LEADERS = ["Falkner", "Bugsy", "Whitney", "Morty", "Chuck", "Jasmine", "Pryce", "Clair"]
+
+
+def sevii_leader_pools() -> list:
+    """[(name, [species])] for the 8 Sevii-island leaders. Read by offset off Falkner's struct, not
+    by name, because 'Jasmine' collides with an earlier trainer of the same name; the name at each
+    step is checked so a non-contiguous block fails loud instead of feeding wrong species. ROWE
+    scales their levels to the player's badge count at battle time, so no static level is stored."""
+    rom = _rom()
+    base = trainer_struct(SEVII_LEADERS[0])
+    out = []
+    for i, name in enumerate(SEVII_LEADERS):
+        b = base + i * TRAINER_STRUCT_SIZE
+        if not rom.startswith(_encode_text(name), b + TRAINER_NAME_OFF):
+            raise ValueError(f"sevii leader slot {i} is not {name!r}; the gTrainers block moved")
+        ptr = struct.unpack_from("<I", rom, b + TRAINER_PARTY_OFF)[0]
+        if not _in_rom(ptr):
+            raise ValueError(f"sevii leader {name} party pointer {ptr:#x} is outside the ROM")
+        po = _fo(ptr)
+        pool = []
+        for j in range(rom[b + TRAINER_COUNT_OFF]):
+            sp = struct.unpack_from("<H", rom, po + j * TRAINER_ROW_SIZE + TRAINER_ROW_SPECIES)[0]
+            if not 0 < sp < SPECIES_COUNT:
+                raise ValueError(f"sevii leader {name} row {j} species {sp} out of range")
+            pool.append(sp)
+        out.append((name, pool))
+    return out
+
+
+# operand bytes after each 1-byte script opcode, the vanilla pokeemerald command table
+# (pret/pokeemerald asm/macros/event.inc + data/script_cmd_table.inc); ROWE keeps vanilla script
+# numbering, confirmed by the dive walker above and by gtrainers_base's leader control. An opcode
+# absent here ends a walk branch rather than risk a wrong stride. trainerbattle (0x5C) is not in the
+# table: its length varies with the type byte, so the walk records its trainer id and stops there.
+_CMD_OPERAND_LEN = {
+    0: 0, 1: 0, 2: 0, 3: 0, 4: 4, 5: 4, 6: 5, 7: 5, 8: 1, 9: 1, 10: 2, 11: 2, 12: 0, 13: 0, 14: 1,
+    15: 5, 16: 2, 17: 5, 18: 5, 19: 5, 20: 2, 21: 8, 23: 4, 24: 4, 26: 4, 27: 2, 28: 2, 29: 5, 30: 5,
+    31: 5, 32: 8, 33: 4, 34: 4, 35: 4, 36: 4, 40: 2, 41: 2, 42: 2, 43: 2, 44: 4, 45: 0, 46: 0, 47: 2,
+    48: 0, 49: 2, 50: 0, 51: 3, 52: 2, 53: 0, 54: 2, 55: 1, 56: 1, 57: 0, 58: 0, 59: 0, 60: 0, 61: 0,
+    62: 0, 63: 0, 64: 0, 65: 0, 66: 4, 67: 0, 68: 4, 69: 4, 70: 4, 71: 4, 72: 2, 73: 4, 74: 4, 75: 2,
+    76: 2, 77: 2, 78: 2, 87: 6, 88: 4, 89: 4, 90: 0, 91: 3, 93: 0, 94: 0, 95: 0, 96: 2, 97: 2, 98: 2,
+    99: 6, 100: 2, 101: 3, 102: 0, 103: 4, 104: 0, 105: 0, 106: 0, 107: 0, 108: 0, 109: 0, 110: 2,
+    111: 4, 112: 5, 113: 5, 114: 0, 115: 4, 116: 4, 117: 4, 118: 0, 119: 1, 120: 4, 121: 14, 122: 2,
+    123: 4, 124: 2, 125: 2, 126: 0, 127: 2, 128: 2, 129: 2, 130: 2, 131: 2, 132: 2, 133: 4, 134: 4,
+    135: 4, 136: 4, 137: 2, 138: 3, 139: 0, 140: 0, 141: 0, 142: 0, 143: 2, 144: 5, 145: 5, 146: 5,
+    147: 3, 148: 2, 149: 3, 150: 2, 151: 1, 152: 2, 153: 2, 154: 1, 155: 4, 156: 2, 157: 3, 158: 2,
+    159: 2, 160: 0, 161: 4, 162: 8, 163: 0, 164: 2, 165: 0, 166: 1, 167: 2, 168: 3, 169: 2, 170: 8,
+    171: 2, 172: 4, 173: 4, 174: 0, 175: 4, 176: 4, 177: 7, 178: 0, 179: 2, 180: 2, 181: 2, 182: 5,
+    183: 0, 184: 4, 185: 4, 186: 4, 187: 5, 188: 5, 189: 4, 190: 4, 191: 4, 192: 2, 193: 2, 194: 2,
+    195: 1, 196: 0, 197: 0, 198: 2, 199: 1, 200: 4, 201: 0, 202: 0, 203: 0, 204: 5, 205: 2, 206: 2,
+    207: 0, 208: 2, 209: 0, 210: 3, 211: 2, 212: 0, 213: 2, 214: 0, 215: 0, 216: 0, 217: 0, 218: 0,
+    219: 4, 220: 1, 221: 2, 222: 2, 223: 4, 224: 0, 225: 2, 226: 4,
+}
+_SCR_END, _SCR_RETURN, _SCR_CALL, _SCR_GOTO, _SCR_GOTO_IF, _SCR_CALL_IF = 2, 3, 4, 5, 6, 7
+TRAINERBATTLE_OP = 0x5C
+
+# leader -> its gym map (group, num), the known-good control that pins gTrainers' base: the base is
+# the one offset for which every leader's struct divides to a trainer id that its own gym map's
+# object scripts invoke. Tate&Liza are omitted; their stored name does not match by raw text.
+_HOENN_GYM_MAP = {"Roxanne": (11, 3), "Brawly": (3, 3), "Wattson": (10, 0), "Flannery": (4, 1),
+                  "Norman": (8, 1), "Winona": (12, 1), "Juan": (15, 0)}
+
+
+def _script_trainer_ids(addr: int) -> set:
+    """Trainer ids reached from a script address, following goto/call/goto_if/call_if with the
+    vanilla length table. A branch ends at end/return, at an opcode outside the table, or right
+    after a trainerbattle (whose id it records first)."""
+    rom = _rom()
+    found, seen, stack = set(), set(), [addr]
+    while stack:
+        a = stack.pop()
+        while _in_rom(a) and a not in seen:
+            seen.add(a)
+            fa = _fo(a)
+            op = rom[fa]
+            if op == TRAINERBATTLE_OP:
+                found.add(struct.unpack_from("<H", rom, fa + 2)[0])
+                break
+            if op in (_SCR_END, _SCR_RETURN):
+                break
+            if op == _SCR_GOTO:
+                a = struct.unpack_from("<I", rom, fa + 1)[0]
+                continue
+            if op == _SCR_CALL:
+                stack.append(struct.unpack_from("<I", rom, fa + 5)[0])
+                a = struct.unpack_from("<I", rom, fa + 1)[0]
+                continue
+            if op in (_SCR_GOTO_IF, _SCR_CALL_IF):
+                stack.append(struct.unpack_from("<I", rom, fa + 2)[0])
+                a += 1 + _CMD_OPERAND_LEN[op]
+                continue
+            if op not in _CMD_OPERAND_LEN:
+                break
+            a += 1 + _CMD_OPERAND_LEN[op]
+    return found
+
+
+def _map_trainer_tiles(group: int, num: int) -> dict:
+    """{trainer_id: (x, y)} for every object on (group, num) whose event script runs a battle."""
+    out = {}
+    for _idx, x, y, _mv, script in map_object_scripts(group, num):
+        for tid in _script_trainer_ids(script):
+            out.setdefault(tid, (x, y))
+    return out
+
+
+@lru_cache(maxsize=None)
+def gtrainers_base() -> int:
+    """File offset of gTrainers[0]. Derived, not symboled: for each trainerbattle id on Roxanne's
+    gym map a candidate base = her struct - id*0x40 is scored against the other leaders, and the
+    base that maps the most leaders' structs to an id their own gym runs wins. Raises unless at
+    least four leaders agree, so a moved table fails loud instead of returning a wrong id."""
+    structs, gym_ids = {}, {}
+    for name, (g, num) in _HOENN_GYM_MAP.items():
+        structs[name] = trainer_struct(name)
+        gym_ids[name] = _map_trainer_tiles(g, num)
+    best = None
+    for x in gym_ids["Roxanne"]:
+        base = structs["Roxanne"] - x * TRAINER_STRUCT_SIZE
+        if base < 0:
+            continue
+        hits = [n for n in structs
+                if (structs[n] - base) % TRAINER_STRUCT_SIZE == 0
+                and (structs[n] - base) // TRAINER_STRUCT_SIZE in gym_ids[n]]
+        if best is None or len(hits) > len(best[1]):
+            best = (base, hits)
+    if best is None or len(best[1]) < 4:
+        raise ValueError("gTrainers base not confirmed by the Hoenn leader control")
+    return best[0]
+
+
+def sevii_leader_locations() -> list:
+    """[(name, group, num, x, y) or (name, None, None, None, None)] for the 8 Sevii leaders. Their
+    trainer ids come off Falkner's struct through the derived gTrainers base; every map's object
+    scripts are scanned for those ids to recover the tile each leader stands on."""
+    base = gtrainers_base()
+    falk = trainer_struct(SEVII_LEADERS[0])
+    ids = {(falk + i * TRAINER_STRUCT_SIZE - base) // TRAINER_STRUCT_SIZE: nm
+           for i, nm in enumerate(SEVII_LEADERS)}
+    located = {}
+    for g in range(MAP_GROUP_COUNT):
+        for num in range(map_count(g)):
+            if map_header(g, num) is None:
+                continue
+            tiles = _map_trainer_tiles(g, num)
+            for tid in ids:
+                if tid in tiles and tid not in located:
+                    located[tid] = (g, num, *tiles[tid])
+    out = []
+    for tid, nm in sorted(ids.items()):
+        if tid in located:
+            g, num, x, y = located[tid]
+            out.append((nm, g, num, x, y))
+        else:
+            out.append((nm, None, None, None, None))
+    return out
+
+
+def trainer_name(trainer_id: int) -> str:
+    """Name on the gTrainers struct at the derived base for this id, empty past the table."""
+    o = gtrainers_base() + trainer_id * TRAINER_STRUCT_SIZE + TRAINER_NAME_OFF
+    return _decode(_rom()[o:o + 12])
+
+
+def all_trainer_tiles() -> list:
+    """[(trainer_id, name, group, num, x, y)] for every trainer whose battle a map object script
+    runs, the first tile found for each id. Generalizes sevii_leader_locations to the whole roster,
+    so the db carries where each opponent stands, not just the eight Sevii leaders."""
+    located = {}
+    for g in range(MAP_GROUP_COUNT):
+        for num in range(map_count(g)):
+            if map_header(g, num) is None:
+                continue
+            for tid, (x, y) in _map_trainer_tiles(g, num).items():
+                located.setdefault(tid, (g, num, x, y))
+    return [(tid, trainer_name(tid), *located[tid]) for tid in sorted(located)]
+
+
+def _script_item_given(addr: int) -> int | None:
+    """The item an object script hands over, read off the first setorcopyvar into VAR_0x8000,
+    following goto/call/goto_if the same way the trainer walk does. None when no such write runs."""
+    rom = _rom()
+    seen, stack = set(), [addr]
+    while stack:
+        a = stack.pop()
+        while _in_rom(a) and a not in seen:
+            seen.add(a)
+            fa = _fo(a)
+            op = rom[fa]
+            if op == SETORCOPYVAR_OP and struct.unpack_from("<H", rom, fa + 1)[0] == VAR_RECEIVED_ITEM:
+                return struct.unpack_from("<H", rom, fa + 3)[0]
+            if op in (_SCR_END, _SCR_RETURN):
+                break
+            if op == _SCR_GOTO:
+                a = struct.unpack_from("<I", rom, fa + 1)[0]
+                continue
+            if op == _SCR_CALL:
+                stack.append(struct.unpack_from("<I", rom, fa + 5)[0])
+                a = struct.unpack_from("<I", rom, fa + 1)[0]
+                continue
+            if op in (_SCR_GOTO_IF, _SCR_CALL_IF):
+                stack.append(struct.unpack_from("<I", rom, fa + 2)[0])
+                a += 1 + _CMD_OPERAND_LEN[op]
+                continue
+            if op not in _CMD_OPERAND_LEN:
+                break
+            a += 1 + _CMD_OPERAND_LEN[op]
+    return None
+
+
+def field_items() -> list:
+    """[(group, num, x, y, kind, item, flag)] for every item placed on a map. kind 'ball' is an
+    object the player opens, its item read from the script, flag None. kind 'hidden' is a BgEvent
+    the player searches out, its item and hidden-item flag read straight from the event struct."""
+    out = []
+    for g in range(MAP_GROUP_COUNT):
+        for num in range(map_count(g)):
+            h = map_header(g, num)
+            if h is None:
+                continue
+            for _i, x, y, _mv, script in map_object_scripts(g, num):
+                item = _script_item_given(script)
+                if item and item < ITEM_COUNT and item_name(item).strip():
+                    out.append((g, num, x, y, "ball", item, None))
+            ev = struct.unpack_from("<I", _rom(), h + MAPHDR_EVENTS)[0]
+            if not _in_rom(ev):
+                continue
+            cnt = _rom()[_fo(ev) + MAPEVENTS_BG_COUNT]
+            p = struct.unpack_from("<I", _rom(), _fo(ev) + MAPEVENTS_BG_PTR)[0]
+            if not _in_rom(p) or not _in_rom(p + cnt * BG_STRIDE):
+                continue
+            for i in range(cnt):
+                o = _fo(p) + i * BG_STRIDE
+                if _rom()[o + 5] != BG_HIDDEN_ITEM_KIND:
+                    continue
+                x, y = struct.unpack_from("<hh", _rom(), o)
+                item = struct.unpack_from("<H", _rom(), o + 8)[0]
+                flag = struct.unpack_from("<H", _rom(), o + 10)[0] & 0x0FFF
+                out.append((g, num, x, y, "hidden", item, flag))
+    return out
+
+
+CHECKFLAG_OP = 0x2B
+
+
+def _walk_script_ops(addr: int):
+    """Yield (opcode, file_offset) for every command reached from a script address, following
+    goto/call/goto_if/call_if. A branch stops at end/return or at any opcode absent from the
+    length table, trainerbattle (0x5C) among them, so a battle ends its branch as the trainer walk
+    expects. A reusable primitive for the flag/item scans that only need to see each command."""
+    rom = _rom()
+    seen, stack = set(), [addr]
+    while stack:
+        a = stack.pop()
+        while _in_rom(a) and a not in seen:
+            seen.add(a)
+            fa = _fo(a)
+            op = rom[fa]
+            yield op, fa
+            if op in (_SCR_END, _SCR_RETURN):
+                break
+            if op == _SCR_GOTO:
+                a = struct.unpack_from("<I", rom, fa + 1)[0]
+                continue
+            if op == _SCR_CALL:
+                stack.append(struct.unpack_from("<I", rom, fa + 5)[0])
+                a = struct.unpack_from("<I", rom, fa + 1)[0]
+                continue
+            if op in (_SCR_GOTO_IF, _SCR_CALL_IF):
+                stack.append(struct.unpack_from("<I", rom, fa + 2)[0])
+                a += 1 + _CMD_OPERAND_LEN[op]
+                continue
+            if op not in _CMD_OPERAND_LEN:
+                break
+            a += 1 + _CMD_OPERAND_LEN[op]
+
+
+def _map_script_ptrs(group: int, num: int) -> list:
+    """Script pointers in a map's map-script table: a bare u32 for most entry types, and the
+    per-entry pointers inside the var-conditional tables (types 2 and 4)."""
+    rom = _rom()
+    h = map_header(group, num)
+    if h is None:
+        return []
+    t = struct.unpack_from("<I", rom, h + MAPHDR_SCRIPTS)[0]
+    if not _in_rom(t):
+        return []
+    out, o = [], _fo(t)
+    for _ in range(MAP_SCRIPT_SCAN_CAP):
+        typ = rom[o]
+        if typ == 0:
+            break
+        if typ in (2, 4):
+            tb = struct.unpack_from("<I", rom, o + 1)[0]
+            if _in_rom(tb):
+                to = _fo(tb)
+                for _j in range(32):
+                    if struct.unpack_from("<H", rom, to)[0] == 0:
+                        break
+                    p = struct.unpack_from("<I", rom, to + 4)[0]
+                    if _in_rom(p):
+                        out.append(p)
+                    to += 8
+        else:
+            p = struct.unpack_from("<I", rom, o + 1)[0]
+            if _in_rom(p):
+                out.append(p)
+        o += 5
+    return out
+
+
+def badge_flags() -> list:
+    """[(badge, flag, region, leader)] for the 16 badges. Flags come from rowe_symbols, the values
+    play.py reads off the save; badge is 0-based (badge 0 is the first), region 'hoenn' for 0-7 and
+    'sevii' for 8-15, leader the trainer who awards it."""
+    import rowe_symbols as sym
+    out = [(i, sym.FLAG_BADGE01 + i, "hoenn", LEADERS[i]) for i in range(8)]
+    out += [(8 + i, sym.JOHTO_BADGE01 + i, "sevii", SEVII_LEADERS[i]) for i in range(8)]
+    return out
+
+
+def badge_gate_maps() -> list:
+    """[(group, num, badge)] for every map whose object or map scripts run a checkflag on a badge
+    flag, the ROM-verifiable signal that the map gates on that badge. Each gym map checks its own
+    badge and each Sevii leader room checks the badge it awards, which is the control."""
+    flag_badge = {flag: badge for badge, flag, _r, _l in badge_flags()}
+    hits = {}
+    for g in range(MAP_GROUP_COUNT):
+        for num in range(map_count(g)):
+            if map_header(g, num) is None:
+                continue
+            scripts = [s for _i, _x, _y, _mv, s in map_object_scripts(g, num)]
+            scripts += _map_script_ptrs(g, num)
+            for s in scripts:
+                for op, fa in _walk_script_ops(s):
+                    if op == CHECKFLAG_OP:
+                        fl = struct.unpack_from("<H", _rom(), fa + 1)[0]
+                        if fl in flag_badge:
+                            hits.setdefault((g, num), set()).add(flag_badge[fl])
+    return sorted((g, num, b) for (g, num), bs in hits.items() for b in bs)
 
 
 def self_check() -> None:

@@ -63,6 +63,9 @@ VICTORY_ROAD = [(24, 43), (24, 44), (24, 45)]
 # -> Hall4 -> Wallace -> Hall of Fame, each dropping out as reached. group 16 is IndoorEverGrande.
 ENDGAME_CHAIN = VICTORY_ROAD + [(16, 10), (16, 9), (16, 0), (16, 5), (16, 1), (16, 6),
                                 (16, 2), (16, 7), (16, 3), (16, 8), (16, 4), (16, 11)]
+# Three Island dock, the Seagallop ferry row that stays open once the 8 Hoenn badges are in; the
+# Johto-bound rows report locked and gate out, so this is where the 8-badge leg heads.
+SEVII_ENTRY = (0, 79)
 
 
 def build_graph(path: str, flags=frozenset()) -> map_graph.MapGraph:
@@ -225,6 +228,18 @@ def planning_anchor(status: dict, here: tuple, gym: tuple | None) -> tuple:
     return tuple(target) if target else here
 
 
+def sevii_goal(graph: map_graph.MapGraph, moves: frozenset) -> tuple:
+    """(goal, reason) for the 8-badge Sevii leg. Every Johto gym sits behind the Seagallop ferry and
+    Hoenn grass tops out under the cap, so travel to Three Island while it is unwalked, then explore
+    the nearest unvisited map reachable from it. Never grind."""
+    if SEVII_ENTRY not in graph.visited:
+        return {"mode": "travel", "to": list(SEVII_ENTRY)}, f"travel to Three Island {list(SEVII_ENTRY)}"
+    reach = hops_from(SEVII_ENTRY, graph, moves)
+    target = min((m for m in reach if m not in graph.visited),
+                 key=lambda m: (reach[m], m), default=SEVII_ENTRY)
+    return {"mode": "explore", "to": list(target), "cap": None}, f"on Three Island, exploring Sevii toward {list(target)}"
+
+
 def recommend(status: dict, graph: map_graph.MapGraph) -> tuple:
     """(goal dict, reason)"""
     badges = status.get("badges", 0)
@@ -239,6 +254,11 @@ def recommend(status: dict, graph: map_graph.MapGraph) -> tuple:
     unbeaten = unbeaten_gyms(status)
     gym = nearest_gym(unbeaten, hops, still_closed(status, graph))
     anchor = planning_anchor(status, here, gym)
+    if badges >= len(GYM_BADGE) and unbeaten and gym is None:
+        # 8 Hoenn badges, no gym the walk can route to: the Johto gyms are ferry-locked and Hoenn
+        # grass raises nothing at cap, so take the Three Island ferry and explore Sevii, never grind
+        goal, note = sevii_goal(graph, frozenset(status.get("field_moves", [])))
+        return goal, f"at cap {cap}, {badges} badges, no gym reachable, {note}"
     if len(party) < PARTY_SIZE or low < cap:
         grass = grind_map(graph, blocked, anchor, cap)
         return {"mode": "grind", "map": grass, "cap": cap}, f"party {len(party)}/6, lowest attacker L{low} vs cap {cap}, grind {grass} toward {list(anchor)}"

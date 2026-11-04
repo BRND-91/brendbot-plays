@@ -69,9 +69,11 @@ def main() -> None:
         assert allclosed["mode"] == "explore", allclosed
         os.remove(planner.GYM_CLOSED)
 
-        # every Hoenn gym beaten holds a grind, never a gym goal
+        # every Hoenn gym beaten and no gym the walk can route to: the run travels to Three Island
+        # and never grinds Hoenn again, even short of cap, since the grass raises nothing at the cap
         done = planner.recommend(_status((0, 17), 8, set(range(8))), graph)[0]
-        assert done["mode"] == "grind", done
+        assert done["mode"] == "travel" and done["to"] == [0, 79], done
+        assert done["mode"] != "grind", done
 
         # step 2: grind anchors on the next gym and ranks visited grass by hops then ROM wild
         # level. Route 101 (0,16), Route 102 (0,17) and Route 103 (0,19) walked, anchored on
@@ -222,6 +224,40 @@ def main() -> None:
         finally:
             if os.path.exists(gpj):
                 os.remove(gpj)
+
+        # 8 Hoenn badges and no gym the walk can route to (the Johto ferry rows report locked and
+        # gate out): the run never grinds Hoenn again, it travels to Three Island (0,79), the open
+        # ferry row. a ferry-blind graph stands in for every Johto gym gated off, the complement of
+        # the bug2 case above where the ferry is open and the gym routes.
+        fds, gps = tempfile.mkstemp(suffix=".json")
+        os.close(fds)
+        os.remove(gps)
+        try:
+            gsev = map_graph.MapGraph(gps, world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs())
+            sevgoal, sevwhy = planner.recommend(_status((0, 36), 8, set(range(8)), cap_level=50), gsev)
+            assert sevgoal["mode"] == "travel" and sevgoal["to"] == [0, 79], (sevgoal, sevwhy)
+            assert sevgoal["mode"] != "grind", sevwhy
+        finally:
+            if os.path.exists(gps):
+                os.remove(gps)
+
+        # sevii_goal scoping, pinned on a synthetic graph so the ROM table can't move it: Three
+        # Island unwalked -> travel there; walked -> explore the nearest unvisited map reachable from
+        # it ((0,80) at one hop beats (0,82) at two, and visited (0,81) is skipped), never grind
+        fdv, gpv = tempfile.mkstemp(suffix=".json")
+        os.close(fdv)
+        os.remove(gpv)
+        try:
+            sv = map_graph.MapGraph(gpv)
+            sv.cur_badges = 8
+            sv.world = {(0, 79): {(0, 80), (0, 81)}, (0, 80): {(0, 82)}}
+            assert planner.sevii_goal(sv, frozenset())[0] == {"mode": "travel", "to": [0, 79]}
+            sv.visited.update({(0, 79), (0, 81)})
+            isl = planner.sevii_goal(sv, frozenset())[0]
+            assert isl == {"mode": "explore", "to": [0, 80], "cap": None}, isl
+        finally:
+            if os.path.exists(gpv):
+                os.remove(gpv)
 
         # hops_from applies _gate_shut, the same test route uses, so a ferry gate recorded by an
         # older executor (version below the current cap) no longer hides a gym the walk can now cross,

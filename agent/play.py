@@ -64,6 +64,9 @@ class NullStreamer:
     def push(self, screen) -> None:
         pass
 
+    def set_speed(self, speed: int) -> None:
+        pass
+
     def close(self) -> None:
         pass
 
@@ -722,6 +725,7 @@ class Player:
         self.last_snapshot = time.monotonic()
         self.last_status = time.monotonic()
         self._status_sig: tuple | None = None  # party fields status.json last carried
+        self._speed_ctl_mtime: float | None = None  # mtime of speed.ctl last applied to the streamer
         self.graph: map_graph.MapGraph | None = None
         self._last_obs: tuple | None = None
         self._blocked: dict = {}
@@ -744,6 +748,8 @@ class Player:
         self._start_items: dict = {}  # personality -> held item at that mon's first action, for the Belch precondition; keyed by mon not slot so a switch-in doesn't inherit the slot's prior baseline
         self._avoid_slots: set = set()  # move slots a freeze bailed on this battle, skipped by pick_move
         self._freezes = 0  # unstick firings this battle: the first swaps the slot, the second runs from a wild foe
+        self._ran = False  # a Run was pressed last step; a still-open battle next step means the escape was refused
+        self._cant_escape = False  # a refused Run latched this battle (Arena Trap and the other escape locks): fight or switch, never Run again
         self._last_pick = 0  # slot pick_move last returned, the one a freeze blames
 
     def run(self, frames: int, keys: int = 0) -> None:
@@ -1125,14 +1131,11 @@ class Player:
             self._freezes += 1
             _, me_f, _ = self.sides()
             wild = not self.g.battle_type_flags() & BATTLE_TYPE_TRAINER
-            if self._freezes >= 2 and wild and me_f is not None and me_f.battler == 0:
+            if self._freezes >= 2 and wild and not self._cant_escape and me_f is not None and me_f.battler == 0:
                 # the slot swap did not clear it and the foe is wild: leave rather than freeze the
                 # turn again on a move the engine keeps refusing. Run sits down-right of Fight
                 print(f"  unstick: second freeze after {self._act_stuck} steps vs wild, running", flush=True)
-                self.tap(eb.KEY_DOWN)
-                self.tap(eb.KEY_RIGHT)
-                self.tap(eb.KEY_A)
-                self.run(150)
+                self._run_away()
             else:
                 # bar the slot the freeze is stuck on so pick_move takes the next usable move, then
                 # clear whatever box is up; B on the bare grid is a no-op
@@ -1174,20 +1177,29 @@ class Player:
             self._advance_intro(b, me, foes)
             return
         disabled = self.g.disabled_move(b)
+        self._note_escape_result()
         # Run escapes the whole encounter and only works from the lead battler; a non-lead mon in a
         # double battle has no working Run on its action grid, so steering there freezes the turn.
         # That mon fights with what it has instead (a status move still advances the turn) or switches.
-        can_run = me.battler == 0
-        if can_run and not any(me.moves[s.slot] != disabled and s.damage > 0 for foe in foes for s in rank_moves(me, foe)) \
+        # A refused escape (_cant_escape) drops Run for this battle so a trapping foe is fought, not
+        # run at until the WEDGE stall.
+        can_run = me.battler == 0 and not self._cant_escape
+        if not any(me.moves[s.slot] != disabled and s.damage > 0 for foe in foes for s in rank_moves(me, foe)) \
                 and not self.g.battle_type_flags() & BATTLE_TYPE_TRAINER:
-            # Disable or empty PP left no damaging move, so flee the wild battle instead of
-            # flailing with a status move; Disable resets when the next battle starts
-            print(f"  flee: no usable damaging move (disabled {disabled}), running", flush=True)
-            self.tap(eb.KEY_DOWN)
-            self.tap(eb.KEY_RIGHT)
-            self.tap(eb.KEY_A)
-            self.run(150)
-            return
+            # the lead's every move reads 0 damage against this foe (Disable, no PP, or a type
+            # immunity like an Electric move into Dugtrio's Ground): send out a bench mon that can
+            # hurt it and win the fight, falling to a flee only when no party mon can damage it.
+            # _open_wild_switch drives the single-battle lead grid, so a double is left to fight.
+            single_lead = me.battler == 0 and not self.g.battle_type_flags() & BATTLE_TYPE_DOUBLE
+            bench = self._bench_that_can_hit(me, foes) if single_lead else None
+            if bench is not None and not self._wild_switched and self._switch_budget(me.personality):
+                print(f"  switch: {me.nickname} cannot damage foe, slot {bench} in to fight", flush=True)
+                self._open_wild_switch(bench)
+                return
+            if can_run:
+                print(f"  flee: no damaging move in party (disabled {disabled}), running", flush=True)
+                self._run_away()
+                return
         # a KO in hand from the faster mon ends the fight now, whatever the HP: Pawmo at 12/57
         # ran from a Lombre at 1/43 it outsped, and the exp stayed on the field
         finish = all(me.spd > f.spd and any(me.moves[s.slot] != disabled and s.damage >= f.hp for s in rank_moves(me, f)) for f in foes)
@@ -1238,10 +1250,7 @@ class Player:
                 # Run sits at action-grid slot 3, one step down and one right of Fight.
                 # A trainer refuses Run, so the press loops the menu until STALL; fight
                 # through instead and the overworld rotates or heals after the flee.
-                self.tap(eb.KEY_DOWN)
-                self.tap(eb.KEY_RIGHT)
-                self.tap(eb.KEY_A)
-                self.run(150)
+                self._run_away()
                 return
         flags = self.g.battle_type_flags()
         # the voluntary switch drives the single-battle action grid; in a double the party menu
@@ -1549,6 +1558,36 @@ class Player:
         else:
             self._switch_fails += 1
         return self._switch_fails < SWITCH_FAIL_CAP
+
+    def _run_away(self) -> None:
+        """Press Run from the wild action grid (slot 3, one down and one right of Fight) and mark
+        the attempt. If the next decision is still this battle, the escape was refused, so
+        _note_escape_result latches _cant_escape and the Run sites stop pressing it."""
+        self._ran = True
+        self.tap(eb.KEY_DOWN)
+        self.tap(eb.KEY_RIGHT)
+        self.tap(eb.KEY_A)
+        self.run(150)
+
+    def _note_escape_result(self) -> None:
+        """Called at the action pick. Arriving here after a Run press means the escape was refused
+        (Arena Trap and the other escape locks keep a wild battle open), so latch _cant_escape for
+        the rest of this battle. A Run that worked ended the battle and this never runs for it."""
+        if self._ran:
+            self._cant_escape = True
+            self._ran = False
+
+    def _bench_that_can_hit(self, me, foes):
+        """Slot of the healthy bench mon with the best edge that still carries a move doing nonzero
+        damage to a foe, or None when no party mon can hurt it. A lead whose every move reads 0
+        damage (an Electric move into Dugtrio's Ground immunity) switches to this mon and wins the
+        fight it would otherwise flee, and Arena Trap makes that flee fail into a stall anyway."""
+        cands = [m for m in self.g.party()
+                 if m.hp > 0 and m.personality != me.personality and can_attack(m)
+                 and any(s.damage > 0 for foe in foes for s in rank_moves(as_battler(m), foe))]
+        if not cands:
+            return None
+        return max(cands, key=lambda m: (lambda d, t: d - t)(*edge(as_battler(m), foes))).slot
 
     @staticmethod
     def gym_ready(party) -> bool:
@@ -2103,6 +2142,12 @@ class Player:
         edge lets the frontier exhaust into a grind instead of the party re-treading the dead warp."""
         if self.graph is None:
             return
+        if status == "locked":
+            # a native menu row drawn locked (a Seagallop island not yet open) holds the field with a
+            # no-go box and never moves the party, reporting the same every run, so the ferry script
+            # edge gates on the first failure under script_no_go instead of burning STUCK_GATE runs
+            self.graph.block(here, hop, self.field_moves(), reason="script_no_go")
+            return
         if status == "unreachable":
             # no path from where the player stands: a border the ROM layout reads shut (no_warp,
             # unreachable, or a dormant dive) is gated for good under that reason, any other is a
@@ -2231,7 +2276,12 @@ class Player:
             # hop on; an errand's return leaves it False so a route map left for a heal stays open
             self._returned = back
             exits = self._landing_exits()
-            print(f"land: {list(self.g.position()[2:])} exits {sorted(list(e) for e in exits)} back={back}", flush=True)
+            here = tuple(self.g.position()[2:])
+            print(f"land: {list(here)} exits {sorted(list(e) for e in exits)} back={back}", flush=True)
+            # warp-linked exits a landing reaches (the onward Sevii maps off (0,79)) are real borders
+            # routing must see; ROM map-edge connections alone miss a warp-only onward map
+            if self.graph is not None:
+                self.graph.observe(here, list(exits))
             # a landing area w/ no way on except back across this border is a dead end for the
             # area it was entered from, whatever the rest of the map connects to: Route 104's
             # north half enters Petalburg on a pond-locked corner that reaches no door and no
@@ -2271,6 +2321,8 @@ class Player:
         exits = {(c.group, c.num) for c in rowe_map.connections(self.e)
                  if c.direction in edge and any(edge[c.direction](t) for t in reach)}
         for wp in rowe_map.warps(self.e):
+            if (wp.dest_group, wp.dest_num) == S.MAP_DYNAMIC:
+                continue  # a dynamic warp's dest resolves at runtime, not a border to route to
             around = {(wp.x, wp.y), (wp.x, wp.y + 1), (wp.x, wp.y - 1), (wp.x + 1, wp.y), (wp.x - 1, wp.y)}
             if around & reach:
                 exits.add((wp.dest_group, wp.dest_num))
@@ -2325,6 +2377,19 @@ class Player:
         w, h = grid.width - 2 * S.MAP_OFFSET, grid.height - 2 * S.MAP_OFFSET
         return nearer_border(tier, (x, y), (w, h), rowe_rom.map_connections(*here))
 
+    def _leave_dynamic_interior(self, here: tuple, moves: frozenset) -> bool:
+        """Step back out through a dynamic return door when no graph route leaves here. A map whose
+        only warps are dynamic (dest MAP_DYNAMIC, resolved only when stepped through) carries no world
+        edge, so travel and explore find no hop out and a party saved inside one strands every run.
+        take_warp steps the return door and the game drops the party on the map it entered from, where
+        routing resumes. True when the map changed. Guards on a dynamic warp being present, so a
+        building with a concrete exit warp keeps its real edge and this never fires."""
+        if not any((w.dest_group, w.dest_num) == S.MAP_DYNAMIC for w in rowe_map.warps(self.e)):
+            return False
+        r = self.errands.take_warp(S.MAP_DYNAMIC, surf="SURF" in moves, tools=moves)
+        print(f"leave dynamic interior {list(here)} -> {r} at {self.g.position()[:2]}", flush=True)
+        return r in ("map_changed", "battle")
+
     def travel_toward(self, dest: tuple) -> None:
         here = self.g.position()[2:]
         if here == dest:
@@ -2362,6 +2427,8 @@ class Player:
             # the border) never outranks the only graph route out of this map; retake it
             hop = self.graph.route(here, dest, field_moves=moves)
         if hop is None:
+            if self._leave_dynamic_interior(here, moves):
+                return
             # no graph route and nothing to explore: the only hop is blocked, a field-move gate on
             # the path (Dewford past water without Surf) or a run-local snag. End the run so the
             # supervisor re-plans instead of idling the whole budget with no status write, which
@@ -2383,8 +2450,12 @@ class Player:
         moves = self.field_moves()
         self.graph.cur_badges = self.g.badges()
         region = self.region()
-        hop = self.graph.explore_hop(here, self._blocked_from(region), moves)
+        blocked = self._blocked_from(region)
+        hop = self.graph.explore_hop(here, blocked, moves)
         if hop is None:
+            if self._leave_dynamic_interior(here, moves):
+                self._idle = 0
+                return
             if self.graph.frontier_exhausted(moves) or self.graph.gated_frontier(moves):
                 # no open border left to walk: try a dive off the cluster first, then hold on a
                 # capless wild-battle grind at any badge count. demote never raises the goal exit, so
@@ -2394,12 +2465,32 @@ class Player:
                 if not self._dive_frontier(region, moves):
                     self.demote_to_grind(here)
             else:
-                # only this run's borders are blocked: an NPC in a doorway clears in a tick, a pocket
-                # whose every exit bounced or dead-ended never does, so idle a few ticks for the
-                # transient case then re-plan, relaunching off the snapshot with the run-local blocks
-                # cleared instead of standing on run(60) for the rest of the budget
+                # explore_hop found no open border reachable from this cluster, but the explore
+                # target can sit across a cluster boundary the hop search does not cross: the Sevii
+                # arrival map (2,9) reaches the mainland frontier only back over the dock edge, so
+                # route toward the target and cross. A run-local block is not the precondition, since
+                # the live wedge was blocked-empty with (0,79) still routable off (2,9), which the
+                # old blocked-gated retake skipped and idled to a supervisor stop on
+                dest = tuple(self.goal.get("to") or ())
+                retake = self.graph.route(here, dest, field_moves=moves) if (dest and dest != here) else None
+                if retake is not None:
+                    status, result = self._cross_to(here, retake)
+                    self._after_cross(region, retake, (status, result))
+                    if result in ("moved", "battle"):
+                        self._idle = 0
+                        return
+                    # the hop toward the target would not cross this run, so fall to the idle counter
+                    # and let the stuck exit fire rather than re-crossing the same hop every tick
+                # no route off here, or the retake would not move: an NPC in a doorway clears in a
+                # tick, a pocket whose every exit bounced or dead-ended never does, so idle a few
+                # ticks for the transient case then re-plan off the snapshot with the run-local
+                # blocks cleared instead of standing on run(60) for the rest of the budget
                 self._idle += 1
                 if self._idle >= IDLE_STREAK:
+                    if not getattr(self, "_explore_idle_dumped", False):
+                        print(f"explore idle: here {list(here)} dest {list(dest)} retake {retake and list(retake)}, "
+                              f"blocked {sorted(list(b) for b in blocked)}", flush=True)
+                        self._explore_idle_dumped = True
                     # the pocket the walk cannot leave is no place to resume from, so the state file
                     # keeps the last snapshot that preceded it
                     self.keep_state = True
@@ -2454,24 +2545,32 @@ class Player:
         return self.errands.take_dive(rowe_map.DIR_DIVE, surf="SURF" in moves, tools=moves) in ("map_changed", "battle")
 
     def demote_to_grind(self, here: tuple) -> None:
-        """Reachable frontier is gated behind a field move, so hold the run on a wild-battle grind
-        rather than idle in place; capless so it never raises the goal exit that would stop the
-        supervisor and drop the stream. A grassless dead-end (the one-connection surf pocket off
-        map 24) can never spawn a wild battle, so the grind routes to the nearest reachable grass
-        map instead of idling the frame on a map that has none."""
-        x, y, _, _ = self.g.position()
-        grid = self._grid()
-        reach = grid.reachable((x, y), "SURF" in self.field_moves())
-        has_grass = any(t in reach for t in grid.tiles_with_id(TALL_GRASS_ID))
-        target = here if has_grass else (self._reachable_grass_map(here) or here)
-        self.goal = {"mode": "grind", "map": list(target), "cap": None}
-        self._held = (len(self.graph.visited), len(self.graph.adj), frozenset(self.field_moves()), self.battles)
+        """Reachable frontier is gated behind a field move, so hold the run rather than idle in place.
+        At 8 badges there is no Hoenn grind worth holding, every gym left is behind the ferry and the
+        grass is under cap, so the run takes the Three Island / Sevii-explore goal instead. Below 8
+        badges it holds a capless wild-battle grind so the goal exit never stops the supervisor and
+        drops the stream; a grassless dead-end (the one-connection surf pocket off map 24) spawns no
+        wild battle, so the grind routes to the nearest reachable grass map rather than idle a
+        grassless frame."""
+        if self.g.badges() >= len(planner.GYM_BADGE):
+            self.goal, note = planner.sevii_goal(self.graph, self.field_moves())
+            self._held = None
+            msg = f"frontier gated at {list(here)}, 8 badges, {note}"
+        else:
+            x, y, _, _ = self.g.position()
+            grid = self._grid()
+            reach = grid.reachable((x, y), "SURF" in self.field_moves())
+            has_grass = any(t in reach for t in grid.tiles_with_id(TALL_GRASS_ID))
+            target = here if has_grass else (self._reachable_grass_map(here) or here)
+            self.goal = {"mode": "grind", "map": list(target), "cap": None}
+            self._held = (len(self.graph.visited), len(self.graph.adj), frozenset(self.field_moves()), self.battles)
+            msg = f"explore frontier gated at {list(here)}, grinding toward {list(target)}"
         if self.state_path:
             path = os.path.join(os.path.dirname(self.state_path), "goal.json")
             with open(path + ".tmp", "w") as f:
                 json.dump(self.goal, f)
             os.replace(path + ".tmp", path)
-        self.say(f"explore frontier gated at {list(here)}, grinding toward {list(target)}")
+        self.say(msg)
 
     def _grind_no_grass(self, here: tuple, x: int, y: int) -> None:
         """No grass reachable from the grind tile. A grid read mid-transition (menu closing, map
@@ -2817,6 +2916,26 @@ class Player:
             self.tap(eb.KEY_B)
             self.run(20)
 
+    def _apply_speed_ctl(self, states_dir: str) -> None:
+        """Pick up a speed change the control endpoint wrote to speed.ctl and pass
+        it to the streamer, which re-spawns the encoder. Keyed on mtime so an
+        unchanged file costs one stat per loop and the encoder bounces only on an
+        actual change."""
+        path = os.path.join(states_dir, "speed.ctl")
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return
+        if mtime == self._speed_ctl_mtime:
+            return
+        self._speed_ctl_mtime = mtime
+        try:
+            with open(path) as f:
+                speed = int(f.read().strip())
+        except (OSError, ValueError):
+            return
+        self.s.set_speed(speed)
+
     def loop(self, seconds: float) -> None:
         end = time.monotonic() + seconds
         i = 0
@@ -2851,6 +2970,7 @@ class Player:
                 if since > STATUS_SECONDS or (sig != self._status_sig and since > 0.5):
                     self._status_sig = sig
                     self.write_status()
+                self._apply_speed_ctl(states_dir)
             if self.g.in_battle():
                 if not in_battle:
                     in_battle = True
@@ -2864,6 +2984,8 @@ class Player:
                     self._start_items = {}
                     self._avoid_slots = set()
                     self._freezes = 0
+                    self._ran = False
+                    self._cant_escape = False
                 self.battle_step()
                 streak = self.stall_check(self.battle_signature(), streak)
             else:
@@ -2952,12 +3074,13 @@ def main() -> None:
     ap.add_argument("--state", default=rowe_live.LIVE_SAVE)
     ap.add_argument("--minutes", type=float, default=120)
     ap.add_argument("--no-stream", action="store_true")
+    ap.add_argument("--speed", type=int, default=1)
     a = ap.parse_args()
     rowe_rom.self_check()
     emu = eb.Emu()
     with open(a.state, "rb") as f:
         emu.load_state(f.read())
-    streamer = NullStreamer() if a.no_stream else FrameStreamer(emu.core)
+    streamer = NullStreamer() if a.no_stream else FrameStreamer(emu.core, speed=a.speed)
     player = Player(emu, streamer, ledger_path=a.state + ".caught.json")
     player.state_path = a.state
     player._live_writer = rowe_live.is_live_target(a.state)

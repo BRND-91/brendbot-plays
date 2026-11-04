@@ -308,7 +308,7 @@ FLAG_RECEIVED_BADGE01 = 0xE25  # +n for the nth badge reward handed over, set be
 FLAG_BADGE01 = 0xCD7  # system flags start at 0xCD0 here (vanilla 0x860), badge 1 is +7 in both
 BADGE_COUNT = 8
 FLAG_SYS_GAME_CLEAR = 0xCD4  # SYSTEM_FLAGS+0x4, set natively by the Hall of Fame; the game-cleared bit
-JOHTO_BADGE01 = 0x2A4  # Johto gym badges, Falkner (0x2A4) through Clair (0x2AB); gyms on map group 2
+JOHTO_BADGE01 = 0x2A4  # badges 9-16 from the 8 Sevii-island leaders, Falkner (0x2A4) through Clair (0x2AB); trainer fights, not gym buildings
 JOHTO_BADGE_COUNT = 8
 MAP_DYNAMIC = (127, 127)  # a dynamic-warp header (group, num): the real destination resolves at runtime
 

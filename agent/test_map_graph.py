@@ -63,5 +63,53 @@ def main() -> None:
     print("ok")
 
 
+def test_version_2_ferry_gate_reopens_at_current_cap(tmp_path):
+    """A Seagallop dock->Three Island arm gated by an older executor (version 2) under the live
+    8-badge field-move set must read open once EXECUTOR_CAP_VERSION advances past it, so routing
+    to the Sevii islands retries the crossing instead of staying shut forever."""
+    import map_graph
+    dock, island = (9, 9), (0, 79)
+    moves = frozenset({"CUT", "DIVE", "ROCKCLIMB", "ROCKSMASH", "SURF", "WATERFALL"})
+    g = map_graph.MapGraph(str(tmp_path / "g.json"), world={dock: {island}})
+    g.cur_badges = 8
+    edge = (dock, island)
+    g.gated[edge] = moves
+    g.gate_badges[edge] = 8
+    g.gate_version[edge] = 2
+    assert g.route(dock, island, field_moves=moves) == island
+
+
+def test_version_4_ferry_gate_reopens_at_current_cap(tmp_path):
+    """A Seagallop dock->Three Island arm last shut by the version-4 executor must read open
+    under the live 8-badge field-move set once EXECUTOR_CAP_VERSION advances past 4, so the
+    re-armed no_row menu dump gets one more crossing attempt to fire on."""
+    import map_graph
+    dock, island = (13, 10), (0, 79)
+    moves = frozenset({"CUT", "DIVE", "ROCKCLIMB", "ROCKSMASH", "SURF", "WATERFALL"})
+    g = map_graph.MapGraph(str(tmp_path / "g.json"), world={dock: {island}})
+    g.cur_badges = 8
+    edge = (dock, island)
+    g.gated[edge] = moves
+    g.gate_badges[edge] = 8
+    g.gate_version[edge] = 4
+    assert g.route(dock, island, field_moves=moves) == island
+
+
+def test_version_5_approach_gate_reopens_at_current_cap(tmp_path):
+    """The dock-approach arm (0,1)->(9,9), last shut by the version-5 executor as a 'bounce',
+    must read open under the live 8-badge field-move set once EXECUTOR_CAP_VERSION advances past
+    5, so the run routes onto the Seagallop dock and the decode-fixed menu gets its crossing."""
+    import map_graph
+    here, dock = (0, 1), (9, 9)
+    moves = frozenset({"CUT", "DIVE", "ROCKCLIMB", "ROCKSMASH", "SURF", "WATERFALL"})
+    g = map_graph.MapGraph(str(tmp_path / "g.json"), world={here: {dock}})
+    g.cur_badges = 8
+    edge = (here, dock)
+    g.gated[edge] = moves
+    g.gate_badges[edge] = 8
+    g.gate_version[edge] = 5
+    assert g.route(here, dock, field_moves=moves) == dock
+
+
 if __name__ == "__main__":
     main()

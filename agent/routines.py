@@ -271,7 +271,9 @@ class Errands:
         selection down to the row whose on-screen text is `label`, then A until the map changes.
         "map_changed" on landing dest, "wrong_map" on landing elsewhere (a per-destination flag still
         shut sends the party back onto the deck), "no_menu" when the menu never opened, "no_row" when
-        `label` is absent from the live option list, else walk_to's status or "stuck". The row is
+        `label` is absent from the live option list, "locked" when the A on the row left the field
+        held with the menu gone (the row's no-go text box, a dock island not yet open), else walk_to's
+        status or "stuck". The row is
         matched by text, since ScriptMenu_ScrollingMultichoice runs in native code the bytecode walker
         can't read, so script_edges carries these crossings chain-unknown and the destination comes off
         the live menu rather than menu_sequence. The visible cursor caps at the bottom window row while
@@ -295,6 +297,11 @@ class Errands:
         rows = self._menu_rows()
         row = next((idx for idx, text in sorted(rows.items()) if text == label), None)
         if row is None:
+            # the menu opened but no row's text equals `label`: log what it did list against what
+            # was sought so an empty read (the array wasn't found) is told apart from a text
+            # mismatch (the row is worded differently) without a live-save probe
+            print(f"ferry no_row: want {label!r} among {sorted(rows.items())}", flush=True)
+            self._dump_menu_array()
             return "no_row"
         for _ in range(row):
             self.tap(eb.KEY_DOWN)
@@ -309,24 +316,99 @@ class Errands:
             return "map_changed"
         if land != src:
             return "wrong_map"
+        if self.e.read(S.FIELD_LOCKED, 1)[0] and not self._menu_rows():
+            return "locked"
+        print(f"ferry stuck: row {row} label {label!r} src {src} "
+              f"field_locked {self.e.read(S.FIELD_LOCKED, 1)[0]} "
+              f"rows {sorted(self._menu_rows().items())}", flush=True)
         return "stuck"
 
     def _menu_rows(self) -> dict:
         """{row index: option text} for the open native multichoice, read off its ListMenuItem array
-        in EWRAM. Each item is {const u8 *label; u32 index}, label a ROM pointer into charmap text, so
-        a contiguous run of pointer-and-index records whose labels decode to letters is the option
-        list. The row index is the item's own index field, which one DOWN press advances by one."""
+        in EWRAM. Each item is {const u8 *label; u32 index}, the label pointing into ROM for a static
+        option such as Cancel, or into the EWRAM string buffers for a name composed at runtime like
+        the Seagallop island rows, so both regions decode. The array is the longest contiguous run of
+        8-byte pointer-and-index records whose labels end in a letter run, which drops a stray EWRAM
+        word that happens to point at text. One DOWN press advances an item's own index field by one."""
         ew = self.e.read(0x02000000, 0x40000)
-        rows: dict = {}
-        for off in range(0, len(ew) - 8, 4):
-            ptr = struct.unpack_from("<I", ew, off)[0]
+
+        def label(ptr: int) -> str | None:
             if 0x08000000 <= ptr < 0x0A000000:
-                text = decode_text(self.e.read(ptr, 24))
-                if len(text) >= 3 and text.strip() and all(c.isalpha() or c == " " for c in text):
-                    idx = struct.unpack_from("<I", ew, off + 4)[0]
-                    if idx < 24:
-                        rows.setdefault(idx, text)
-        return rows
+                raw = self.e.read(ptr, 24)
+            elif 0x02000000 <= ptr < 0x02000000 + len(ew):
+                raw = ew[ptr - 0x02000000: ptr - 0x02000000 + 24]
+            else:
+                return None
+            text = decode_text(raw)
+            # live island rows decode with leading unmapped padding ('??????Four Island'), so keep
+            # the trailing run of letters and spaces instead of requiring the whole decode be clean
+            tail = ""
+            for ch in reversed(text):
+                if ch.isalpha() or ch == " ":
+                    tail = ch + tail
+                else:
+                    break
+            tail = tail.strip()
+            if len(tail) >= 3 and any(c.isalpha() for c in tail):
+                return tail
+            return None
+
+        def record(off: int):
+            if off + 8 > len(ew):
+                return None
+            text = label(struct.unpack_from("<I", ew, off)[0])
+            if text is None:
+                return None
+            idx = struct.unpack_from("<I", ew, off + 4)[0]
+            return (idx, text) if idx < 24 else None
+
+        best: dict = {}
+        best_off = -1
+        off = 0
+        while off < len(ew) - 8:
+            if record(off) is None:
+                off += 4
+                continue
+            run: dict = {}
+            cur = off
+            rec = record(cur)
+            while rec is not None:
+                run.setdefault(rec[0], rec[1])
+                cur += 8
+                rec = record(cur)
+            if len(run) > len(best):
+                best = run
+                best_off = off
+            off = cur + 4
+        self._menu_best_off = best_off
+        return best
+
+    def _dump_menu_array(self) -> None:
+        """One-shot raw dump of the EWRAM slots spanning the run _menu_rows locked onto, to pin the
+        real item-array offset and stride when the decoded run is missing the island rows. Prints the
+        {ptr, idx} record and the decoded label at every 4-byte slot across the found run so a broken
+        stride or a pointer that fails the letter filter shows directly."""
+        if getattr(self, "_menu_dumped", False):
+            return
+        self._menu_dumped = True
+        base = getattr(self, "_menu_best_off", -1)
+        if base < 0:
+            print("ferry dump: no decodable run located", flush=True)
+            return
+        ew = self.e.read(0x02000000, 0x40000)
+
+        def raw(ptr: int) -> str | None:
+            if 0x08000000 <= ptr < 0x0A000000:
+                return decode_text(self.e.read(ptr, 24))
+            if 0x02000000 <= ptr < 0x02000000 + len(ew):
+                return decode_text(ew[ptr - 0x02000000: ptr - 0x02000000 + 24])
+            return None
+
+        lo = max(0, base - 32)
+        hi = min(len(ew) - 8, base + 96)
+        for off in range(lo, hi, 4):
+            ptr, idx = struct.unpack_from("<II", ew, off)
+            print(f"ferry dump off {off:#x} ptr {ptr:#010x} idx {idx} text {raw(ptr)!r}", flush=True)
 
     def descend_gym(self, dest: tuple) -> str:
         """Out of a room gym (Petalburg: rooms stacked on one map, doors up, floor mats back

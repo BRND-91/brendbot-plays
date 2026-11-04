@@ -1,9 +1,10 @@
 #!/bin/bash
 # Supervise play.py for a wall-clock budget: every exit (stall, crash, timer) relaunches
 # from the state file, which play.py only rewrites at responsive moments.
-#   run-grind.sh [hours, default 10]
+#   run-grind.sh [hours, default 10] [speed, default 1]
 cd /opt/brendbot/rowe-agent || exit 1
 end=$((SECONDS + ${1:-10} * 3600))
+speed=${2:-1}
 child=0
 trap 'echo "supervisor: TERM, stopping run"; [ "$child" -gt 0 ] && kill -TERM "$child"; wait "$child"; exit 0' TERM INT
 n=0
@@ -20,7 +21,7 @@ while [ $((end - SECONDS)) -gt 120 ]; do
     # rotating at 50M with one kept since /etc/logrotate.d is read-only on this host
     [ -f states/grind.log ] && [ "$(stat -c%s states/grind.log)" -gt 52428800 ] && mv -f states/grind.log states/grind.log.1
     echo "=== run $n start $(date -u +%FT%TZ), $(( (end - SECONDS) / 60 )) min left ===" >>states/grind.log
-    .venv/bin/python play.py --state states/live.ss --minutes $(( (end - SECONDS) / 60 )) >>states/grind.log 2>&1 &
+    .venv/bin/python play.py --state states/live.ss --minutes $(( (end - SECONDS) / 60 )) --speed "$speed" >>states/grind.log 2>&1 &
     child=$!
     wait "$child"; code=$?
     echo "run $n exit $code at $(date +%T)"

@@ -16,12 +16,13 @@ import json
 import os
 
 Node = tuple  # (map_group, map_num)
+MAP_DYNAMIC = (127, 127)  # a dynamic-warp header: no edge, the real dest resolves at runtime
 
 # The executor's crossing-primitive generation. Bump when a crossing primitive lands (an NPC-talk
 # warp, a descent link, the live-grid border read). A gate recorded below the current version
 # predates such a fix, so _gate_shut reads it open and the walker retries the crossing once; a fresh
 # failure re-records it at the current version. Pre-version gates on disk load as version 0.
-EXECUTOR_CAP_VERSION = 1
+EXECUTOR_CAP_VERSION = 6
 
 
 def _key(node: Node) -> str:
@@ -93,7 +94,9 @@ class MapGraph:
         return {d for d, gate in self.script.get(node, {}).items() if gate <= self.flags}
 
     def neighbors(self, node: Node) -> set:
-        return self.adj.get(node, set()) | self.world.get(node, set()) | self._script_dests(node)
+        out = self.adj.get(node, set()) | self.world.get(node, set()) | self._script_dests(node)
+        assert MAP_DYNAMIC not in out, f"{node} neighbors leaked dynamic warp {MAP_DYNAMIC}"
+        return out
 
     def observe(self, here: Node, neighbors: list) -> list:
         """Record that `here` is visited and borders `neighbors`; return nodes seen for the first time."""

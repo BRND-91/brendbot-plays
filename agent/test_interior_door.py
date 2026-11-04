@@ -75,3 +75,60 @@ def test_no_route_exit_keeps_the_last_snapshot():
     with pytest.raises(play.GoalExit):
         p.travel_toward((0, 27))
     assert p.keep_state is True, "a no-route exit must keep the last good snapshot"
+
+
+def _bounce_player(graph, returned=True):
+    p = play.Player.__new__(play.Player)
+    p.graph = graph
+    p.g = type("_G", (), {"badges": lambda self: 8})()
+    p._blocked = {}
+    p._stuck = {}
+    p._bounces = {}
+    p._returned = returned
+    p.field_moves = lambda: MOVES
+    return p
+
+
+class _BounceGraph:
+    cur_badges = 8
+
+    def __init__(self, calls):
+        self._calls = calls
+
+    def neighbors(self, hop):
+        # more than just the way back, so the first-pass block in _blocked_from is not what fires
+        return {(0, 12), (0, 27)}
+
+    def block(self, *a, **k):
+        self._calls["block"] += 1
+
+
+def test_sole_door_bounce_demotes_instead_of_gating():
+    # (4,5) is an interior whose only outdoor door is (0,12). when the walk bounces straight back
+    # through that door BOUNCE_STREAK times, gating it would re-wall the pocket that
+    # test_interior_sole_exit_is_never_gated guards, so the run demotes to a wild grind and leaves
+    # the door open. the old code suppressed the bounce block here and did nothing, so the executor
+    # ping-ponged (4,5)<->(0,12) for the whole budget and the stream froze on the doorway
+    calls = {"block": 0, "demote": 0}
+    p = _bounce_player(_BounceGraph(calls))
+    p.demote_to_grind = lambda here: calls.__setitem__("demote", calls["demote"] + 1)
+    region, hop = (4, 5, 0, 2), (0, 12)
+    for _ in range(play.BOUNCE_STREAK):
+        p._last_hop = (region, hop)
+        p._blocked_from(region)
+    assert calls["demote"] == 1, "a bounced sole interior door must demote to grind"
+    assert calls["block"] == 0, "the sole door must stay ungated, or the pocket re-walls"
+
+
+def test_outdoor_bounce_still_gates_the_border():
+    # control: (0,19)->(0,3) is an outdoor border, so _never_dead does not apply and the bounce
+    # block still marks it dead after BOUNCE_STREAK, proving the demote is scoped to interior doors
+    calls = {"block": 0, "demote": 0}
+    p = _bounce_player(_BounceGraph(calls))
+    p.demote_to_grind = lambda here: calls.__setitem__("demote", calls["demote"] + 1)
+    region, hop = (0, 19, 0, 2), (0, 3)
+    for _ in range(play.BOUNCE_STREAK):
+        p._last_hop = (region, hop)
+        p._blocked_from(region)
+    assert calls["block"] == 1, "an outdoor border must still gate after BOUNCE_STREAK"
+    assert calls["demote"] == 0, "an outdoor border is not a pocket door, so it never demotes"

@@ -4,6 +4,7 @@ Run `pytest` before every commit; the commit message includes the pass count.
 
 ## Working rules
 
+- No subagents for reading files in this repo. Read the function directly by name with Grep + Read. Subagents only for a search across more than ten files.
 - Never write, restore, or delete `states/live.ss` or `states/live/` without explicit approval. Probes use `/tmp` copies or `states/fixtures/`.
 - Probe dumps and live dumps use different filename prefixes.
 - Evidence cites its source (live/probe/test). Status claims quote a fresh read (log line, pid, mtime), otherwise "not checked".

@@ -165,9 +165,13 @@ The state files under `states/`:
 
 ### ROM mechanics database
 - `build_rom_db.py` builds `games/rowe/rowe_rom.db` from `rowe_rom.py`'s readers, so a mechanics
-  question is a SQL query instead of an emulator boot: `species`, `moves`, `type_chart`,
+  question is a SQL query instead of an emulator boot: `species` (with names), `moves`, `type_chart`,
   `abilities`, `evolutions`, `learnset_levelup`, `tm_list`/`tm_compat`, `egg_moves`, `wild_levels`,
-  `trainers`. Regenerate after a ROM swap.
+  `trainers`, `maps` (with `mapsec`), `map_connections`, `map_warps`, `map_objects`, `items`,
+  `trainer_locations`, `wild_encounters` (species per slot, 7 categories), `field_items` (balls and
+  hidden), `badge_flags`, `badge_gates`, and `map_sections` (`mapsec` to name). The built db is
+  committed at `games/rowe/rowe_rom.db` as the ROM snapshot of record, so a game-state claim cites a
+  table and row there. Regenerate after a ROM swap.
 
 ### Deploy gate and tooling
 - `smoke.py` is the offline promotion gate: it boots frozen savestate fixtures and asserts the nav
