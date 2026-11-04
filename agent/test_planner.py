@@ -8,6 +8,7 @@ import tempfile
 import map_graph
 import planner
 import rowe_rom
+import script_decode
 
 
 def _status(map_id, badges, beaten, cap_level=21, party=6, johto=()):
@@ -46,6 +47,9 @@ def main() -> None:
         # gym by world-edge hops, never a grind
         goal, why = planner.recommend(_status((0, 17), 1, {0}), graph)
         assert goal["mode"] == "gym" and goal["map"] == [8, 1], (goal, why)
+        # the gym goal carries the League-flag count at write time, so the executor completes it on
+        # a Johto win too, where the Hoenn badge var never moves (one Hoenn badge up here -> 1)
+        assert goal["flags"] == 1, goal
 
         # a party short of cap grinds regardless of gym state
         under = planner.recommend(_status((0, 17), 1, {0}, cap_level=18), graph)[0]
@@ -181,6 +185,70 @@ def main() -> None:
         champ["champion"] = True
         champgoal, champwhy = planner.recommend(champ, gw)
         assert champgoal["mode"] == "done", (champgoal, champwhy)
+
+        # build_graph is the one graph factory both the CLI planner and the executor use, so the two
+        # never route over a different neighbor set. The script-warp layer loads (the Seagallop ferry)
+        # and the passed gate flags gate its arms; a graph built without that layer is ferry-blind,
+        # which is why the CLI planner wrote explore from a Hoenn map while the ferry sat open.
+        fdb, gpb = tempfile.mkstemp(suffix=".json")
+        os.close(fdb)
+        os.remove(gpb)
+        try:
+            fac = planner.build_graph(gpb, flags=script_decode.gate_flags())
+            assert fac.script, "build_graph must load the script-warp layer"
+            assert fac.flags == set(script_decode.gate_flags()), fac.flags
+            assert (0, 75) in fac._script_dests((13, 10)), "Seagallop dock routes to One Island (0,75)"
+            blind = map_graph.MapGraph(gpb, world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs())
+            assert not blind._script_dests((13, 10)), "a graph without the script layer is ferry-blind"
+            # a gated ferry arm needs its flag: flag 3284 opens the (13,10)->(26,9) arm
+            assert (26, 9) not in planner.build_graph(gpb, flags=frozenset())._script_dests((13, 10))
+            assert (26, 9) in planner.build_graph(gpb, flags=frozenset({3284}))._script_dests((13, 10))
+        finally:
+            if os.path.exists(gpb):
+                os.remove(gpb)
+
+        # bug2: with the ferry-aware graph the ladder reaches Johto. From a Hoenn map (0,4) at 8
+        # Hoenn badges and 0 Johto, hops_from crosses the Seagallop arms the same way route does, so
+        # the nearest unbeaten gym is Falkner (2,7), never an explore.
+        fdj, gpj = tempfile.mkstemp(suffix=".json")
+        os.close(fdj)
+        os.remove(gpj)
+        try:
+            gj = planner.build_graph(gpj, flags=script_decode.gate_flags())
+            johto = _status((0, 4), 8, set(range(8)), cap_level=50)
+            johto["field_moves"] = ["SURF", "WATERFALL", "DIVE"]
+            jg, jwhy = planner.recommend(johto, gj)
+            assert jg["mode"] == "gym" and jg["map"] == [2, 7], (jg, jwhy)
+        finally:
+            if os.path.exists(gpj):
+                os.remove(gpj)
+
+        # hops_from applies _gate_shut, the same test route uses, so a ferry gate recorded by an
+        # older executor (version below the current cap) no longer hides a gym the walk can now cross,
+        # while a current gate at the same badge count still does. Before this, hops_from skipped any
+        # edge recorded gated under the live moves regardless of badge count or version, so it and
+        # route disagreed and the planner explored a gym route could already reach.
+        fdg, gpg = tempfile.mkstemp(suffix=".json")
+        os.close(fdg)
+        os.remove(gpg)
+        try:
+            mv = frozenset({"SURF"})
+            stale = map_graph.MapGraph(gpg)
+            stale.world = {(0, 0): {(0, 1)}, (0, 1): {(0, 2)}}
+            stale.cur_badges = 8
+            stale.gated[((0, 1), (0, 2))] = mv
+            stale.gate_version[((0, 1), (0, 2))] = 0
+            assert (0, 2) in planner.hops_from((0, 0), stale, mv), "a stale-version gate must not hide a crossable node"
+            cur = map_graph.MapGraph(gpg)
+            cur.world = {(0, 0): {(0, 1)}, (0, 1): {(0, 2)}}
+            cur.cur_badges = 8
+            cur.gated[((0, 1), (0, 2))] = mv
+            cur.gate_version[((0, 1), (0, 2))] = map_graph.EXECUTOR_CAP_VERSION
+            cur.gate_badges[((0, 1), (0, 2))] = 8
+            assert (0, 2) not in planner.hops_from((0, 0), cur, mv), "a current gate at the same badge count hides it, same as route"
+        finally:
+            if os.path.exists(gpg):
+                os.remove(gpg)
 
         print("test_planner OK")
     finally:

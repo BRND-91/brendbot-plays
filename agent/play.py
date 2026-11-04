@@ -1639,6 +1639,7 @@ class Player:
             "johto_flags": [self.g.flag(S.JOHTO_BADGE01 + i) for i in range(S.JOHTO_BADGE_COUNT)],
             "champion": self.g.flag(S.FLAG_SYS_GAME_CLEAR),
             "ferry_flags": {f"0x{f:X}": self.g.flag(f) for f in FERRY_FLAGS},
+            "gate_flags": sorted(self._graph_flags()),
             "caught_species": sorted(self.ledger.caught),
             "dex_owned": dex_owned, "dex_seen": dex_seen, "rom_sha": rom_sha(),
             "wanted_types": sorted(rowe_rom.TYPE_NAMES[t] for t in self.wanted),
@@ -1681,9 +1682,13 @@ class Player:
                 raise GoalExit(f"goal reached: {len(self.graph.visited)} maps mapped")
             return
         if mode == "gym":
-            badges = self.g.badges()
-            if badges > self.goal.get("badges", 0):
-                raise GoalExit(f"goal reached: badge {badges} earned")
+            # a Johto leader sets a League flag (0x2A4-0x2AB), not the Hoenn badge var self.g.badges()
+            # reads, so the gym goal completes on the League-flag count rising past its write-time
+            # value, which covers a Hoenn win and a Johto win alike
+            won = (sum(self.g.flag(S.FLAG_BADGE01 + i) for i in range(S.BADGE_COUNT))
+                   + sum(self.g.flag(S.JOHTO_BADGE01 + i) for i in range(S.JOHTO_BADGE_COUNT)))
+            if won > self.goal.get("flags", self.goal.get("badges", 0)):
+                raise GoalExit(f"goal reached: gym cleared, {won} league flags up")
             return
         if mode == "sevii":
             # the Sevii leg's routed destination and its badge-flag decode are a later ticket. Until
@@ -2143,8 +2148,18 @@ class Player:
         key = self._stuck_key(here, hop, moves)
         self._stuck_hits[key] = self._stuck_hits.get(key, 0) + 1
         self._save_stuck_hits()
-        if self._stuck_hits[key] >= STUCK_GATE:
+        if self._stuck_hits[key] >= STUCK_GATE and not self._never_dead(here, hop):
             self.graph.block(here, hop, moves, reason="stuck")
+
+    def _never_dead(self, here: tuple, hop: tuple) -> bool:
+        """An indoor map whose only warp to a non-indoor map is this hop keeps that exit open: a
+        bounce or stuck tally never gates the sole door back to the overworld, which an interior's
+        door always is. A Lavaridge interior the walk kept re-entering gated its one door and
+        wedged the whole grind."""
+        if self.graph is None or not rowe_rom.is_indoor(*here):
+            return False
+        outside = {d for _, _, d in rowe_rom.map_warps(*here) if not rowe_rom.is_indoor(*d)}
+        return tuple(hop) in outside and len(outside) <= 1
 
     def _border_open(self, here: tuple, hop: tuple) -> str | None:
         """Why the border of `here` toward `hop` is crossable, read off the ROM layout rather than
@@ -2203,14 +2218,22 @@ class Player:
 
     @staticmethod
     def _stuck_key(here: tuple, hop: tuple, moves: frozenset) -> str:
-        return f"{here[0]},{here[1]}>{hop[0]},{hop[1]}|{','.join(sorted(moves))}"
+        # the executor-cap version is in the key so a crossing-primitive bump starts the tally
+        # fresh: a pre-bump count already at STUCK_GATE would re-gate the edge on the first miss
+        # and cancel the single retry the version grants
+        return f"{here[0]},{here[1]}>{hop[0]},{hop[1]}|{','.join(sorted(moves))}|v{map_graph.EXECUTOR_CAP_VERSION}"
 
     def _load_stuck_hits(self, path: str) -> dict:
         self._stuck_hits_path = path
-        if os.path.exists(path):
-            with open(path) as f:
-                return json.load(f)
-        return {}
+        if not os.path.exists(path):
+            return {}
+        with open(path) as f:
+            hits = json.load(f)
+        # drop tallies from before the current executor-cap version: a crossing-primitive bump
+        # invalidates them, so the 32-miss Seagallop dock rows never re-gate the ferry the new
+        # primitive can cross. keys carry their version suffix (see _stuck_key)
+        suffix = f"|v{map_graph.EXECUTOR_CAP_VERSION}"
+        return {k: v for k, v in hits.items() if k.endswith(suffix)}
 
     def _save_stuck_hits(self) -> None:
         if not getattr(self, "_stuck_hits_path", None):
@@ -2298,7 +2321,7 @@ class Player:
                 self._blocked.setdefault(region, set()).add(hop)
             if self._returned:
                 n = self._bounces[(region, hop)] = self._bounces.get((region, hop), 0) + 1
-                if n >= BOUNCE_STREAK and self.graph is not None:
+                if n >= BOUNCE_STREAK and self.graph is not None and not self._never_dead(region[:2], hop):
                     # the hop keeps leading straight back here: a repeated identical plan is a wrong
                     # plan, not an exit. Mark the border dead for the session so the next pick and any
                     # re-exec take another exit; travel_toward ends the run only when none is left.
@@ -2365,6 +2388,9 @@ class Player:
             # holds a capless grind at the gated frontier and keeps the stream up.
             if self.goal.get("mode") == "gym" and tuple(self.goal.get("map", ())) == dest:
                 self.record_closed_gym(dest, "travel_stuck")
+            # resume the last good snapshot rather than re-save the wedged tile, or replan() bakes the
+            # stuck spot into live.ss every exit and the signature repeats until the supervisor stops
+            self.keep_state = True
             raise GoalExit(f"travel stuck: no route from {list(here)} to {list(dest)}, re-planning")
         nxt = self.graph.route(hop, dest, field_moves=moves) if hop != dest else None
         print(f"hop: {list(here)} region {list(region[2:])} -> dest {list(dest)}: route {list(hop)} onward {nxt and list(nxt)}, blocked {sorted(list(b) for b in blocked)}", flush=True)
@@ -2378,14 +2404,12 @@ class Player:
         hop = self.graph.explore_hop(here, self._blocked_from(region), moves)
         if hop is None:
             if self.graph.frontier_exhausted(moves) or self.graph.gated_frontier(moves):
-                # no open border left to walk: try a dive off the cluster first. below 8 badges a
-                # gated frontier falls to a wild-battle grind rather than idling against a gate the
-                # walk cannot open. at 8 badges there is no gym left and the party is over cap 45, so
-                # a gated frontier means the endgame route out is blocked and a grind earns nothing,
-                # so halt on an unsupported reason the supervisor stops on instead of the walk back west
+                # no open border left to walk: try a dive off the cluster first, then hold on a
+                # capless wild-battle grind at any badge count. demote never raises the goal exit, so
+                # the stream stays up and the next in-process replan re-decides from the ferry-aware
+                # graph rather than the supervisor relaunching into the same dead goal every 30s. The
+                # supervisor's unsupported handler stays a backstop for an exit this path never raises.
                 if not self._dive_frontier(region, moves):
-                    if self.g.badges() >= 8:
-                        raise GoalExit(f"unsupported: endgame blocked at {list(here)}, no reachable frontier past the last badge")
                     self.demote_to_grind(here)
             else:
                 # only this run's borders are blocked: an NPC in a doorway clears in a tick, a pocket
@@ -2429,7 +2453,7 @@ class Player:
             if node[0] == 0 and node[1] >= 16:
                 return node
             for nb in self.graph.neighbors(node):
-                if self.graph.gated.get((node, nb)) == moves or nb in seen:
+                if nb in seen or self.graph._gate_shut(node, nb, moves):
                     continue
                 seen.add(nb)
                 q.append(nb)
@@ -2825,9 +2849,8 @@ class Player:
         if self.state_path:
             states_dir = os.path.dirname(self.state_path)
             self.goal = read_goal(os.path.join(states_dir, "goal.json"))
-            self.graph = map_graph.MapGraph(os.path.join(states_dir, "map_graph.json"),
-                                            world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs(),
-                                            script=script_decode.script_edges(), flags=self._graph_flags())
+            self.graph = planner.build_graph(os.path.join(states_dir, "map_graph.json"),
+                                             flags=self._graph_flags())
             self._stuck_hits = self._load_stuck_hits(os.path.join(states_dir, "stuck_hits.json"))
         # points accrue at trainer-level milestones and the supervisor relaunches often enough
         # that a launch-time spend keeps them from piling up unspent; once per process, since

@@ -15,3 +15,5 @@ agent/states/
 agent/.venv/
 __pycache__/
 *.pyc
+agent/swaps.json
+agent/status.json

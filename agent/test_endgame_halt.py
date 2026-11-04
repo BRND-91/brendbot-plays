@@ -1,9 +1,9 @@
-"""At 8 badges every Hoenn gym is beaten and the party is over cap 45, so an explore step that
-finds the frontier gated has no productive grind left: the endgame route out is blocked (the Ever
-Grande waterfall up to the Victory Road warp). explore_step raises an "unsupported" GoalExit the
-supervisor halts on instead of falling through to demote_to_grind, which would walk the party back
-west across Hoenn. Below 8 badges the same gated frontier still demotes to a grind."""
-from play import GoalExit, Player
+"""An explore step that finds the frontier gated holds the run on a capless wild-battle grind at
+every badge count, including 8, so the stream stays up and the next in-process replan re-decides
+the goal from the ferry-aware graph. Raising "unsupported" here relaunched the supervisor into the
+same dead goal every 30s (the Lavaridge STOP line); the supervisor's unsupported handler stays a
+backstop for an exit explore_step no longer raises. A dive off the cluster is tried first."""
+from play import Player
 
 
 class _Graph:
@@ -36,29 +36,24 @@ def _player(badges):
     p.region = lambda: (0, 8, 0)
     p._blocked_from = lambda region: set()
     p._dive_frontier = lambda region, moves: False  # no dive off the cluster
-    return p
+    demoted = []
+    p.demote_to_grind = lambda here: demoted.append(here)
+    return p, demoted
 
 
-def test_badge8_gated_frontier_halts_unsupported():
-    p = _player(8)
-    try:
-        p.explore_step()
-    except GoalExit as g:
-        assert str(g).startswith("unsupported"), f"supervisor halt needs an unsupported reason, got {g}"
-        assert "endgame blocked" in str(g) and "[0, 8]" in str(g), f"reason names no endgame map: {g}"
-    else:
-        raise AssertionError("a gated frontier at 8 badges must halt, never grind the party back west")
+def test_badge8_gated_frontier_demotes_never_raises():
+    p, demoted = _player(8)
+    p.explore_step()  # must not raise GoalExit
+    assert demoted == [(0, 8)], f"a gated frontier at 8 badges holds a grind, got {demoted}"
 
 
 def test_below_badge8_still_demotes_to_grind():
-    p = _player(7)
-    demoted = []
-    p.demote_to_grind = lambda here: demoted.append(here)
+    p, demoted = _player(7)
     p.explore_step()
     assert demoted == [(0, 8)], f"below 8 badges a gated frontier still grinds, got {demoted}"
 
 
 if __name__ == "__main__":
-    test_badge8_gated_frontier_halts_unsupported()
+    test_badge8_gated_frontier_demotes_never_raises()
     test_below_badge8_still_demotes_to_grind()
     print("test_endgame_halt OK")

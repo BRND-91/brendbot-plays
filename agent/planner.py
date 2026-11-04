@@ -20,6 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import map_graph  # noqa: E402
 import rowe_rom  # noqa: E402
+import script_decode  # noqa: E402
 
 STATES = os.path.join(HERE, "states")
 STATUS = os.path.join(STATES, "status.json")
@@ -62,6 +63,16 @@ VICTORY_ROAD = [(24, 43), (24, 44), (24, 45)]
 # -> Hall4 -> Wallace -> Hall of Fame, each dropping out as reached. group 16 is IndoorEverGrande.
 ENDGAME_CHAIN = VICTORY_ROAD + [(16, 10), (16, 9), (16, 0), (16, 5), (16, 1), (16, 6),
                                 (16, 2), (16, 7), (16, 3), (16, 8), (16, 4), (16, 11)]
+
+
+def build_graph(path: str, flags=frozenset()) -> map_graph.MapGraph:
+    """The map graph both the CLI planner and the in-process executor route over, assembled one way
+    so the two never disagree on the neighbor set. Carries the ROM world edges, the pass-through
+    maps, the script-warp layer (the Seagallop ferry), and the gate flags set right now, so a dock's
+    ferry arm is a neighbor whenever its flag is up. The executor passes flags read live off the
+    emulator; the CLI planner passes the set the executor recorded into status.json."""
+    return map_graph.MapGraph(path, world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs(),
+                              script=script_decode.script_edges(), flags=flags)
 
 
 def executor_running() -> bool:
@@ -150,14 +161,14 @@ def still_closed(status: dict, graph: "map_graph.MapGraph") -> set:
 
 
 def hops_from(start: tuple, graph: "map_graph.MapGraph | None" = None, moves: frozenset = frozenset()) -> dict:
-    """BFS hop distance to every map the party can traverse from `start`, over the same gated
-    three-layer neighbor set `MapGraph.route` walks (the world table, the walked `adj` borders, and
-    the script warps whose gate flags are currently set) and skipping any border the graph recorded
-    gated under exactly `moves`. hops_from and route disagreeing on reachability is what made the
-    planner emit explore for a gym route could already reach, so both read one neighbor set now; a
-    gym nobody has walked to still gets a distance from the world table when no graph is passed."""
+    """BFS hop distance to every map the party can traverse from `start`, over the same three-layer
+    neighbor set `MapGraph.route` walks (the world table, the walked `adj` borders, and the script
+    warps whose gate flags are currently set) and skipping any border `_gate_shut` reports closed,
+    the same badge-count and executor-version test `route` applies. hops_from and route disagreeing
+    on reachability is what made the planner emit explore for a gym route could already reach, so
+    both apply one test now; a gym nobody has walked to still gets a distance from the world table
+    when no graph is passed."""
     edges = rowe_rom.world_edges()
-    gated = graph.gated if graph is not None else {}
     dist = {start: 0}
     frontier = [start]
     while frontier:
@@ -165,7 +176,9 @@ def hops_from(start: tuple, graph: "map_graph.MapGraph | None" = None, moves: fr
         for m in frontier:
             dests = graph.neighbors(m) if graph is not None else edges.get(m, set())
             for d in dests:
-                if d in dist or gated.get((m, d)) == moves:
+                if d in dist:
+                    continue
+                if graph is not None and graph._gate_shut(m, d, moves):
                     continue
                 dist[d] = dist[m] + 1
                 nxt.append(d)
@@ -252,7 +265,7 @@ def recommend(status: dict, graph: map_graph.MapGraph) -> tuple:
     if gym is None:
         target = min(unbeaten, key=lambda g: ALL_GYMS[g])
         return {"mode": "explore", "to": list(target), "cap": None}, f"at cap {cap}, no gym reachable over world edges, exploring toward {list(target)}"
-    goal = {"mode": "gym", "map": list(gym), "badges": badges}
+    goal = {"mode": "gym", "map": list(gym), "badges": badges, "flags": sum(league_flags(status))}
     if gym in GYM_STAND:
         goal["stand"] = list(GYM_STAND[gym])
     retry = " (retry, closed earlier)" if gym in closed_gyms() else ""
@@ -270,7 +283,7 @@ def main() -> None:
         status = json.load(f)
     age = int(time.time() - status["ts"])
     lead = status["party"][0]
-    graph = map_graph.MapGraph(GRAPH, world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs())
+    graph = build_graph(GRAPH, flags=frozenset(status.get("gate_flags", [])))
     goal, why = recommend(status, graph)
     current = json.load(open(GOAL)) if os.path.exists(GOAL) else None
     running = executor_running()
