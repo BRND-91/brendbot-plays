@@ -46,6 +46,13 @@ class Emu:
         self.core = mgba.core.load_path(rom)
         if not self.core:
             raise RuntimeError(f"load_path failed: {rom}")
+        # the binding's mCorePythonCallbackCreate mallocs the callback struct and leaves shutdown,
+        # savedataUpdated and alarm unset, and Core.__init__ already copied that garbage into the
+        # core's list; the core calls savedataUpdated on the frame a flash save finishes syncing
+        cb = self.core._callbacks.context
+        cb.shutdown = cb.savedataUpdated = cb.alarm = ffi.NULL
+        self.core._core.clearCoreCallbacks(self.core._core)
+        self.core._core.addCoreCallbacks(self.core._core, cb)
         if save:
             self._save = mgba.vfs.open_path(save, "r+")
             self.core.load_save(self._save)

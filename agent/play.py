@@ -11,6 +11,7 @@ Progress lines go to stdout for the track-task tail.
 """
 import argparse
 import collections
+import faulthandler
 import json
 import os
 import random
@@ -3508,6 +3509,9 @@ def drive(player: Player, seconds: float) -> None:
 
 
 def main() -> None:
+    # a segfault inside libmgba prints the Python stack to grind.log, which names the step the
+    # core was running; a 139 exit alone named nothing across four relaunches
+    faulthandler.enable()
     ap = argparse.ArgumentParser()
     ap.add_argument("--state", default=rowe_live.LIVE_SAVE)
     ap.add_argument("--minutes", type=float, default=120)
