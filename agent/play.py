@@ -174,6 +174,7 @@ CURE_BUYS = (29, 33)  # Antidote, Parlyz Heal
 # until the Champion falls or the party whites out, so the League 1F lobby (nurse at (4,2), clerk at
 # (16,2)) is the last counter and the gauntlet is fought on the bag.
 LEAGUE_LOBBY = (16, 10)
+HALL_OF_FAME = (16, 11)  # the ceremony room after the Champion; its script runs on A until the game-clear bit is set
 LOBBY_NURSE_STAND = (4, 4)  # below the nurse's counter, facing up; the object is unloaded from the entry mat
 LOBBY_CLERK_STAND = (16, 4)  # below the clerk's counter, facing up
 ELITE_STAND = (6, 6)  # below the trainer at (6,5), the same tile in all four Elite Four rooms and the Champion's
@@ -3086,6 +3087,12 @@ class Player:
             bought = self.errands.buy_at_counter(LOBBY_CLERK_STAND, wants, face=eb.KEY_UP) if wants else {}
             self._lobby_stocked = True
             print(f"league lobby: nurse {healed}, bought {bought} at {self.g.position()[:2]}", flush=True)
+            return True
+        if here == HALL_OF_FAME and not self.g.flag(S.FLAG_SYS_GAME_CLEAR):
+            # the ceremony's text runs on A and the field leaves for the Hall of Fame screen on its
+            # own; a travel goal here exits 'arrived' every tick and hands the run to the supervisor
+            self.tap(eb.KEY_A)
+            self.run(50)
             return True
         flag = ELITE_FLAGS.get(here)
         if flag is None:

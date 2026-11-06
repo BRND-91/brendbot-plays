@@ -18,14 +18,13 @@ BEDROOM = (1, 1)
 
 
 def _drive(p: play.Player, ticks: int) -> int:
-    """cutscene_step off the field, B through the ceremony's text on it, until the field is back
-    on another map; the tick count it took."""
+    """cutscene_step off the field, league_step through the ceremony's text on it, until the field
+    is back on another map; the tick count it took."""
     for t in range(ticks):
         if not p.cutscene_step():
             if p.g.position()[2:] != HALL_OF_FAME and p.g.party():
                 return t
-            p.tap(eb.KEY_B)
-            p.run(50)
+            assert p.league_step(HALL_OF_FAME), "league_step ran nothing on the ceremony"
     return ticks
 
 
@@ -38,6 +37,7 @@ def test_ceremony_saves_and_continue_restores_the_game():
     e = eb.Emu(save=sav)
     e.load_state(open(work, "rb").read())
     p = play.Player(e, play.NullStreamer(), ledger_path=work + ".json")
+    p.goal = {"mode": "travel", "to": list(HALL_OF_FAME)}
     assert p.g.position()[2:] == HALL_OF_FAME and p.g.callback2() == S.CB2_OVERWORLD
     before = (len(p.g.party()), p.g.badges(), p.g.money())
     ticks = _drive(p, 900)
