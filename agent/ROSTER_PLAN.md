@@ -69,10 +69,12 @@ via the guide db (`t_frequently_asked_questions`, `t_trainer_skills`, `t_new_abi
 
 1. The six stat boosts to their cap, Speed and the larger attacking stat first, then HP and the
    defences (the spender buys round-robin today, which puts Def and SpD ahead of the second Spe point).
-2. EVs Changes to its cap, the EV editor's ceiling, so each member's spread is set at its evolution.
-3. XP Boost - Pokémon, levels are the long pole on every leg.
-4. Gold Rush, then Bargain (1% off per level), both pay for the held items below.
-5. Max PP Boost, Sniper Ball, Loot Boost, in that order, w/ whatever is left.
+2. XP Boost - Trainer, since every other skill follows from trainer level (guide FAQ 17).
+3. EVs Changes to its cap, the EV editor's ceiling, so each member's spread is set at its evolution.
+4. Bonus Battle, BP buys the mints, capsules and tutors (guide FAQ 16).
+5. XP Boost - Pokémon, levels are the long pole on every leg.
+6. Gold Rush, then Bargain (1% off per level), both pay for the held items below.
+7. Max PP Boost, Sniper Ball, Loot Boost, in that order, w/ whatever is left.
 
 Only the stat boosts have a stored cost, 3 points a level (`rowe_symbols.SKILL_STAT_COST`). No skill
 cost table exists on disk (no ROWE source checkout, the guide tab carries descriptions only), so
@@ -101,6 +103,29 @@ heal, a Mart trip, a scene, the League leg and a boss room. Not driven yet: an i
 map as a planner goal (TM26 Earthquake in Seafloor Cavern), hidden items through the Dowsing Machine,
 hidden-grass encounters through the Shaking Tool. Menu cursors take the short way round since
 `Errands.menu_step`; the start menu and the skills list no longer lap DOWN to reach a row one above.
+
+### Review additions
+
+- Sell the loot. Ground balls and Pickup drop sellables the bag only hoards today: Star Piece 9800,
+  Nugget 10000, Big Pearl 7500, Big Mushroom 5000, Stardust 2000, Pearl 1400 at ROM buy price, which a
+  Mart buys back at half. The live bag holds a Star Piece, two Big Pearls, three Stardust and two Big
+  Mushrooms unsold. Rule: on every Mart visit sell every item on the sellable list before buying; the
+  clerk errand has no sell branch yet. Heart Scales stay, they pay the move relearner.
+- Fossils revive. The bag carries a Jaw, a Sail and a Helix Fossil at price 0, the Rustboro reviver
+  turns them into Tyrunt, Amaura and Omanyte, and Tyrantrum (Rock/Dragon, Atk 278) scored 51 foes hit
+  super effectively, above Flygon's 46, w/ no wild spawn at all. A fossil in the bag is a roster
+  candidate the catch policy never sees; rule: revive on the first Rustboro visit.
+- BP farms. Gym trainers rebattle without limit after the leader rematch (guide FAQ 10), and the Blue
+  Nurse's PC storage battle fights the player's own boxed mons for EXP, BP and trainer points (FAQ 23),
+  so six L100s in Box 1 are a grind partner w/ no walking. Bonus Battle and XP Boost - Trainer go
+  ahead of Gold Rush in the skill order, since BP buys the mints, capsules and tutors.
+- Boss losses cost 5000 each (330658 to 325658 to 320658 across the three Steven fights) and the
+  planner re-sends the same six without a cap, where gyms hold at GYM_LOSS_CAP. Rule: two losses to a
+  boss hold the goal until the party or its moves change.
+- Travel speed. Repels sit unused (seven Repel, three Super, one Max in the bag; no reference in the
+  executor), so every travel leg pays wild fights it does not want. The Fly Charm at 9 badges gives
+  free Flying Taxi rides and the Fly Tool at 10, neither driven. Rule: a Repel on every travel leg
+  past the party's wild level, Fly between visited towns once the charm is in.
 
 ### Levers, by item
 
