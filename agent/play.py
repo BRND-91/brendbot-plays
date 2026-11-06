@@ -22,10 +22,11 @@ from typing import NamedTuple
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import emu_boot as eb  # noqa: E402
 import rowe_rom  # noqa: E402
-from battle_engine import as_battler, best_switch, edge, first_usable_slot, outmatched, rank_moves, replacement_slot, strongest_bench, weakening_move  # noqa: E402
+from battle_engine import as_battler, best_switch, edge, first_usable_slot, move_value, outmatched, rank_moves, replacement_slot, strongest_bench, weakening_move  # noqa: E402
 import catch  # noqa: E402
 import map_graph  # noqa: E402
 import planner  # noqa: E402
+import region_route  # noqa: E402
 import rowe_live  # noqa: E402
 import rowe_map  # noqa: E402
 import rowe_symbols as S  # noqa: E402
@@ -71,26 +72,31 @@ class NullStreamer:
         pass
 
 ROUTE_101 = (0, 16)
+DONE_EXIT = "done: champion, the League cleared, nothing left to play"  # run-grind.sh stops on the done* reason
+FLASH_BYTES = 0x20000  # the ROM's 1M flash save, blank at 0xFF
 OLDALE = (0, 10)
 LITTLEROOT = (0, 9)
 
 
 def service_towns() -> dict:
-    """town -> (Center, Mart) for every overworld map whose doors lead to one of each, off the
-    ROM's map headers, so a town serves the party the first time the walk reaches it."""
+    """town -> (Center, Mart or None) for every overworld map in groups 0 and 1 whose doors lead to a
+    Center, off the ROM's map headers, so a town serves the party the first time the walk reaches it.
+    One and Two Island hold a Center and no Mart, so a heal stays on the island and only a buy sails."""
     out = {}
-    for n in range(rowe_rom.map_count(0)):
-        dests = {d for *_, d in rowe_rom.map_warps(0, n)}
-        pc = next((d for d in sorted(dests) if rowe_rom.is_center(*d)), None)
-        mart = next((d for d in sorted(dests) if rowe_rom.is_mart(*d)), None)
-        if pc and mart:
-            out[(0, n)] = (pc, mart)
+    for g in (0, 1):
+        for n in range(rowe_rom.map_count(g)):
+            dests = {d for *_, d in rowe_rom.map_warps(g, n)}
+            pc = next((d for d in sorted(dests) if rowe_rom.is_center(*d)), None)
+            mart = next((d for d in sorted(dests) if rowe_rom.is_mart(*d)), None)
+            if pc:
+                out[(g, n)] = (pc, mart)
     return out
 
 
-# the errands run on the town and its two buildings; the loop travels to the nearest town otherwise
+# the errands run on the town and its buildings; the loop travels to the nearest town otherwise. A
+# Center trip picks over every SERVICE town, a Mart trip over the ones whose Mart entry is set
 SERVICE = service_towns()
-SERVICE_MAPS = {town: frozenset({town, *rooms}) for town, rooms in SERVICE.items()}
+SERVICE_MAPS = {town: frozenset({town, *(r for r in rooms if r is not None)}) for town, rooms in SERVICE.items()}
 TALL_GRASS_ID = 13  # every wild battle on Route 101 started on a 0x600D cell
 GRASS_WAIT_TICKS = 20  # 60-frame waits w/ no reachable grass before the grind map is given up
 GRASS_IDLE_CAP = 600  # seconds idling w/ no grass reachable anywhere before exiting no_grass_idle
@@ -142,6 +148,7 @@ ROUTE_RESETS = 3  # door re-entries per gym visit before an off-route run falls 
 ICE_FALL_FLOOR = {(15, 0): (15, 1)}  # Sootopolis: a second step on a cracked ice tile drops the party here
 ICE_DOOR_TILE = {(15, 0): (8, 25)}   # the gym door, where the cover route starts on fresh ice
 HEAL_HP_PERCENT = 30
+FIELD_HEAL_PERCENT = 50  # a bought restore goes on a mon under this off a travel leg, well above the Center line
 POTION_HP_PERCENT = 30  # lead HP under this fraction uses a bag heal before the wild flee
 GYM_READY_HP_PERCENT = 70  # a gym approach tops off at a Center below this lead HP or under two PP attackers
 # Medicine-pocket HP restoratives on this ROM, id -> HP restored (0xffff heals fully), named
@@ -158,16 +165,45 @@ MONEY_RESERVE = 1000  # kept after any Mart trip so a lost fight never strands t
 # battles pay nothing in gen 3, so trainer prize money is the only income.
 BALL_SPEND = (3, 20)  # party short of six: balls are the catch budget
 BALL_SPEND_FULL = (5, 10)  # full party: a few for PC box swaps
-HP_SPEND = (3, 5)
+HP_SPEND = (6, 15)  # a dungeon leg at L100 burns a restore a fight, and the mart is maps away
 CURE_SPEND = (1, 2)
 HP_TIER_PERCENT = 70  # one use of the bought restore covers this much of the party's largest max HP
-HP_TIERS = (28, 37, 36)  # Potion, Super Potion, Hyper Potion
+HP_TIERS = (28, 37, 36, 35)  # Potion, Super Potion, Hyper Potion, Max Potion
 CURE_BUYS = (29, 33)  # Antidote, Parlyz Heal
+# The Elite Four gauntlet: Sidney's door shuts behind the party and no Center or Mart is reachable
+# until the Champion falls or the party whites out, so the League 1F lobby (nurse at (4,2), clerk at
+# (16,2)) is the last counter and the gauntlet is fought on the bag.
+LEAGUE_LOBBY = (16, 10)
+LOBBY_NURSE_STAND = (4, 4)  # below the nurse's counter, facing up; the object is unloaded from the entry mat
+LOBBY_CLERK_STAND = (16, 4)  # below the clerk's counter, facing up
+ELITE_STAND = (6, 6)  # below the trainer at (6,5), the same tile in all four Elite Four rooms and the Champion's
+# room -> the flag its win sets; the Champion's win is the game-clear bit
+ELITE_FLAGS = {**dict(zip(((16, 0), (16, 1), (16, 2), (16, 3)), S.FLAG_DEFEATED_ELITE_4)), (16, 4): S.FLAG_SYS_GAME_CLEAR}
+# (item id, count to hold on entry): Full Restore, Max Revive, Full Heal, Max Elixir, all stocked by the lobby clerk
+LEAGUE_BUYS = ((34, 10), (40, 6), (38, 6), (52, 6))
+REVIVE_ITEMS = (39, 40)  # Revive, Max Revive: a fainted mon on the League leg gets one from the bag between fights
+# post-game boss room -> (defeat flag, the tile below the trainer, faced up): Steven at (19,3), Red at (12,3)
+BOSSES = {(24, 107): (S.FLAG_DEFEATED_METEOR_FALLS_STEVEN, (19, 4)), (24, 51): (S.FLAG_DEFEATED_RED, (12, 4))}
+
+
+def league_shopping_list(money: int, medicine: list) -> list:
+    """[(item id, qty)] topping each LEAGUE_BUYS row up to its count, in counter order, each cut
+    to the money left past the reserve."""
+    held = dict(medicine)
+    budget = money - MONEY_RESERVE
+    out = []
+    for iid, want in LEAGUE_BUYS:
+        price = rowe_rom.item_price(iid)
+        qty = min(want - held.get(iid, 0), budget // price)
+        if qty > 0:
+            out.append((iid, qty))
+            budget -= qty * price
+    return out
 
 
 def hp_tier(max_hp: int) -> int:
     """Item id of the smallest HP restore whose one use covers HP_TIER_PERCENT of max_hp, the
-    Hyper Potion past that, so the battle chooser's smallest-that-covers pick is one item per heal."""
+    Max Potion past that, so the battle chooser's smallest-that-covers pick is one item per heal."""
     need = max_hp * HP_TIER_PERCENT // 100
     return next((iid for iid in HP_TIERS if HP_ITEMS[iid] >= need), HP_TIERS[-1])
 
@@ -481,6 +517,33 @@ def tm_assignments(party: list, ivs: tuple, tms: list, builds: list) -> list:
                 taken.add(i)
                 gaps = {g for g in gaps if rowe_rom.effectiveness(mv.type, (g,)) <= 1}
                 break
+    # a member holding two or more damaging moves of one type (Golduck's three Waters) trades the
+    # weakest of them for the strongest bag TM of a type it does not attack w/ yet, on its larger
+    # offence stat: a fourth same-type move adds no coverage, whatever the next leader wants. The
+    # flex member takes one too, since a box w/ nothing within LEVEL_CUTOFF never swaps it out
+    spent = {slot for slot, *_ in out}
+    for i, m in enumerate(party):
+        if i in taken:
+            continue
+        moves = [rowe_rom.move(mid) for mid in m.moves if mid]
+        types = [mv.type for mv in moves if mv.power >= 10]
+        dup = {t for t in types if types.count(t) >= 2}
+        if not dup:
+            continue
+        st = offence[i]
+        ranked = sorted((p for p in pocket if p[0] not in spent and p[2].power >= 10 and p[2].split != rowe_rom.SPLIT_STATUS
+                         and p[2].type not in types and p[1] in rowe_rom.tm_learnset(m.species)
+                         and st[p[2].split] >= st[1 - p[2].split]),
+                        key=lambda p: (-p[2].power * (p[2].accuracy or 100), p[0]))
+        if not ranked:
+            continue
+        slot, item, mv = ranked[0]
+        own = rowe_rom.species(m.species).types
+        forget = min((k for k, mid in enumerate(m.moves) if mid and rowe_rom.move(mid).type in dup),
+                     key=lambda k: move_value(own, m.moves[k]))
+        out.append((slot, i, forget, mv.id))
+        taken.add(i)
+        spent.add(slot)
     return out
 
 
@@ -697,6 +760,8 @@ class Player:
         self.need_heal = False
         self.shopping = []  # (item id, qty) for the next counter, from shopping_list after each battle
         self.mart_trek = False  # the list alone justifies walking to town, else it waits for a heal run
+        self._lobby_stocked = False  # the League lobby's nurse and clerk visited this entry; a whiteout resets it
+        self._cutscene_cb2 = None  # last non-field callback logged by cutscene_step
         self.rng = random.Random()
         self.battles = 0
         self.wins = 0
@@ -729,12 +794,15 @@ class Player:
         self.graph: map_graph.MapGraph | None = None
         self._last_obs: tuple | None = None
         self._blocked: dict = {}
+        self._bounced: dict = {}  # region -> hops that led straight back; the map-level fallback skips them
         self._stuck: dict = {}
         self._stuck_hits: dict = {}  # "here>hop|moves" -> failed crossings, persisted across runs
         self._stuck_hits_path: str | None = None
         self._item_skip: set = set()  # (map, x, y) of item balls a pickup could not complete this run
         self._last_hop: tuple | None = None
+        self._last_hop_dest: tuple | None = None  # the travel dest the _last_hop crossing served
         self._returned = False  # the last crossing was the walk's own return over _last_hop
+        self._tickets: frozenset | None = None  # key items the graph's ferry layer was built under
         self._bounces: dict = {}  # (region, hop) -> round trips the walk made through it
         self._idle = 0  # consecutive explore ticks with no hop; a passing NPC clears, a trapped pocket does not
         self._held: tuple | None = None  # (visited, adj, moves, battles) a capless hold-grind started at
@@ -745,6 +813,8 @@ class Player:
         self._switch_active: int | None = None  # personality the voluntary-switch fail count tracks
         self._switch_fails = 0
         self._wild_switched = False  # a wild fight gets one voluntary switch: the low lead out, the finisher in
+        self._used_slots: dict = {}  # personality -> move slots confirmed this battle, Last Resort's precondition
+        self._switched_in: set = set()  # personalities the type-edge switch brought in this battle
         self._start_items: dict = {}  # personality -> held item at that mon's first action, for the Belch precondition; keyed by mon not slot so a switch-in doesn't inherit the slot's prior baseline
         self._avoid_slots: set = set()  # move slots a freeze bailed on this battle, skipped by pick_move
         self._freezes = 0  # unstick firings this battle: the first swaps the slot, the second runs from a wild foe
@@ -764,9 +834,28 @@ class Player:
 
     def tap(self, keys: int, hold: int = TAP_HOLD, gap: int = TAP_GAP) -> None:
         if self.g.in_battle():
-            print(self._battle_press_log(keys), flush=True)
+            if keys == eb.KEY_A and self._a_on_spent_slot():
+                # the ROM answers A on a 0-PP slot with the no-PP box and parks the cursor back on
+                # the same slot, so every A here is the wedge; B is the one key that leaves the list
+                print(f"  deny A on 0-PP slot, B{self._battle_press_log(keys)[len('  press A'):]}", flush=True)
+                keys = eb.KEY_B
+            else:
+                print(self._battle_press_log(keys), flush=True)
         self.run(hold, keys)
         self.run(gap)
+
+    def _a_on_spent_slot(self) -> bool:
+        """True when the chooser's Fight list is open w/ the cursor on a move whose PP is 0, read
+        under CB2_BATTLE_MAIN so a stale comm under the bag or party callback never trips it."""
+        g = self.g
+        if g.callback2() != S.CB2_BATTLE_MAIN:
+            return False
+        b = g.chooser()
+        if not g.in_move_list(b):
+            return False
+        mons = g.battlers()
+        slot = g.move_cursor(b) & 3
+        return b < len(mons) and slot < len(mons[b].pp) and mons[b].pp[slot] == 0
 
     def _battle_press_log(self, keys: int) -> str:
         """One line naming a battle press and the state read before it, so a wrong press is
@@ -819,10 +908,11 @@ class Player:
         gBattleCommunication[b]: at the selection-script box (comm 6) tap B, the only key that leaves
         it, and return "box"; at a move list bounced under the idle controller (comm 3) return
         "move_list" so the caller steers to a PP'd slot instead of confirming the parked 0-PP one. comm
-        is read only under a choose or intro-idle controller func, where it is the live sub-state; the
-        bag and party-menu callbacks leave it holding a stale value a blind read would act on."""
-        cf = self.g.controller_func(b)
-        if cf not in S.PLAYER_CHOOSE_ACTION_FUNCS and cf not in INTRO_IDLE_FUNCS:
+        is read only under CB2_BATTLE_MAIN, where it is the live sub-state; the bag and party-menu
+        callbacks leave it holding a stale value a blind read would act on. The gate used to be a
+        controller-func allow-list, and every ROM handler missing from it (0x84f4c78, 0x84f5b50,
+        0x84f6d4c, one per wedge) sent the blind A back into the parked 0-PP slot."""
+        if self.g.callback2() != S.CB2_BATTLE_MAIN:
             return ""
         c = self.g.comm(b)
         if c == S.SELECTION_SCRIPT_COMM_STATE:
@@ -892,12 +982,14 @@ class Player:
     def pick_move(self, me, foes) -> int:
         self._start_items.setdefault(me.personality, me.item)
         disabled = self.g.disabled_move(me.battler)
-        ranked = [s for foe in foes for s in rank_moves(me, foe)
+        used = frozenset(self._used_slots.get(me.personality, ()))
+        ranked = [s for foe in foes for s in rank_moves(me, foe, used)
                   if me.moves[s.slot] != disabled and s.slot not in self._avoid_slots
                   and self._selectable(me, s.move)]
         if ranked:
             top = max(ranked, key=lambda s: s.score)
-            print(f"  {me.nickname}: {top.move.name} x{top.effectiveness:g} est {top.damage:.0f} vs {[f'{f.nickname} {f.hp}/{f.max_hp}' for f in foes]}", flush=True)
+            barred = f" barred {sorted(self._avoid_slots)}" if self._avoid_slots else ""
+            print(f"  {me.nickname}: {top.move.name} x{top.effectiveness:g} est {top.damage:.0f} vs {[f'{f.nickname} {f.hp}/{f.max_hp}' for f in foes]}{barred}", flush=True)
             self._last_pick = top.slot
             return top.slot
         # scoring left nothing selectable: take the most-PP move still allowed (Belch barred until
@@ -921,6 +1013,10 @@ class Player:
 
         A ball only flies at a lone foe, so a double battle KOs one side first; a trainer
         blocks the ball and the game still consumes it."""
+        if self.g.badges() >= len(planner.ALL_GYMS):
+            # the team is built once every gym is down: a soften switch or a chip move in Victory
+            # Road is a free hit taken for a box the run never opens, so the fight goes to max damage
+            return None
         flags = self.g.battle_type_flags()
         if flags & BATTLE_TYPE_TRAINER or flags & BATTLE_TYPE_DOUBLE:
             # A wild double keeps two foe slots the whole battle, so the softener-switch and throw
@@ -975,11 +1071,7 @@ class Player:
             print(f"  throw: bag never opened (cb2 {cb2:#x}), backing out, state {path}.ss", flush=True)
             self.tap(eb.KEY_B)
             return
-        for _ in range(6):
-            if self.g.bag_position()[0] == S.BAG_POCKET_POKE_BALLS:
-                break
-            self.tap(eb.KEY_RIGHT)
-            self.run(30)
+        self.errands.bag_to_pocket(S.BAG_POCKET_POKE_BALLS, settle=30)
         for _ in range(8):
             if self.g.bag_position()[1] == 0:
                 break
@@ -1016,12 +1108,7 @@ class Player:
             print(f"  item: bag never opened (cb2 {cb2:#x}), backing out, state {path}.ss", flush=True)
             self.tap(eb.KEY_B)
             return
-        for _ in range(6):
-            pk = self.g.bag_position()[0]
-            if pk == S.BAG_POCKET_MEDICINE:
-                break
-            self.tap(eb.KEY_RIGHT if pk < S.BAG_POCKET_MEDICINE else eb.KEY_LEFT)
-            self.run(30)
+        self.errands.bag_to_pocket(S.BAG_POCKET_MEDICINE, settle=30)
         for _ in range(pocket_slot + 8):
             cur = self.g.bag_position()[1]
             if cur == pocket_slot:
@@ -1072,6 +1159,20 @@ class Player:
             # a tap eaten while the list draws leaves the cursor put; the readback retries it
             self.tap(key)
             self.wait_until(lambda: self.g.move_cursor(battler) != cur, 12)
+
+    def _bar_frozen_slot(self, me) -> None:
+        """Bar the last pick for the rest of the battle only while the ROM still holds it refused:
+        the move list bounced back (comm 3) or the selection-script box (comm 6). A freeze on any
+        other sub-state (a held text box at comm 5, every unstick in the live log) is not the move's
+        fault, and barring it there dropped Pawmot's Close Combat for Spark x0 vs Excadrill and
+        Greedent's Bite then Covet for Rollout x0.5 vs Garchomp, for the rest of each fight."""
+        b = me.battler if me is not None else 0
+        live = self.g.callback2() == S.CB2_BATTLE_MAIN
+        if not live or not (self.g.in_move_list(b) or self.g.in_selection_script(b)):
+            print(f"  unstick: frozen {self._act_stuck} steps off the move list (comm {self.g.comm(b) if live else 'n/a'}), slot {self._last_pick} kept", flush=True)
+            return
+        self._avoid_slots.add(self._last_pick)
+        print(f"  unstick: frozen {self._act_stuck} steps on the refused pick, barring slot {self._last_pick}, next usable move", flush=True)
 
     def _battle_pulse(self) -> tuple:
         """State that moves whenever the engine advances a text box or hands off control: the four
@@ -1137,10 +1238,8 @@ class Player:
                 print(f"  unstick: second freeze after {self._act_stuck} steps vs wild, running", flush=True)
                 self._run_away()
             else:
-                # bar the slot the freeze is stuck on so pick_move takes the next usable move, then
-                # clear whatever box is up; B on the bare grid is a no-op
-                self._avoid_slots.add(self._last_pick)
-                print(f"  unstick: frozen {self._act_stuck} steps, barring slot {self._last_pick}, next usable move", flush=True)
+                # clear whatever box is up after the slot decision; B on the bare grid is a no-op
+                self._bar_frozen_slot(me_f)
                 self.tap(eb.KEY_B)
                 self.run(30)
             self._act_stuck = 0
@@ -1257,10 +1356,11 @@ class Player:
         # never opened (Fortree's Flint + Edwardo pair, five STALLs before the fight resumed)
         if flags & BATTLE_TYPE_TRAINER and not flags & BATTLE_TYPE_DOUBLE:
             party = self.g.party()
-            slot = best_switch(party, me, foes, SWITCH_MARGIN)
+            slot = best_switch(party, me, foes, SWITCH_MARGIN, ko_edge=me.personality not in self._switched_in)
             if slot is not None and self._switch_budget(me.personality):
                 print(f"  switch: {me.nickname} out on matchup, slot {slot} in", flush=True)
                 self.switch_to = party[slot].personality
+                self._switched_in.add(party[slot].personality)
                 # after a foe faints the game asks "will you switch?" w/ Yes on cursor 0, the
                 # same cursor as Fight, and Yes opens the party menu as a free switch. A first;
                 # a voluntary switch opens the move list instead, so back out and take Pokémon
@@ -1338,6 +1438,11 @@ class Player:
         for _ in range(INTRO_PRESSES):
             if self.g.choosing(0) or self.g.choosing(2) or not self.g.in_battle():
                 return
+            if self.g.callback2() in CB2_PARTY_MENU:
+                # the turn that played out under this loop fainted the mon and opened the forced
+                # replacement menu w/ the cursor on the fainted slot; every A here picks that mon
+                # ("no energy left to battle!"), so party_menu_step takes over next step
+                return
             act = self._comm_action(b)
             if act == "box":
                 # _comm_action tapped B to leave the no-PP box; an A would re-open it, the Seaking
@@ -1355,7 +1460,7 @@ class Player:
             self.tap(eb.KEY_A)
             for _ in range(INTRO_STEP_FRAMES // INTRO_POLL_FRAMES):
                 self.run(INTRO_POLL_FRAMES)
-                if self.g.choosing(0) or self.g.choosing(2):
+                if self.g.choosing(0) or self.g.choosing(2) or self.g.callback2() in CB2_PARTY_MENU:
                     return
                 if self._battle_pulse() != before:
                     break
@@ -1377,6 +1482,7 @@ class Player:
             return False
         self.tap(eb.KEY_A)
         self.run(30)
+        self._used_slots.setdefault(me.personality, set()).add(landed & 3)
         if self.g.battle_type_flags() & BATTLE_TYPE_DOUBLE and self.g.chooser() == b:
             # a double battle always asks which foe to hit, even after one foe faints, so key
             # off the battle type and not the live-foe count; A locks the default target
@@ -1598,6 +1704,31 @@ class Player:
             return False
         return sum(1 for m in party if can_attack(m)) >= 2
 
+    def _plan_shopping(self, party, balls: int) -> None:
+        """The next counter's list and whether it alone is worth the walk: an empty ball pocket w/ a
+        party to fill, or a travel leg standing outdoors w/ the HP restores under the floor, since a
+        dungeon entered on a thin pocket ends in the Center trek the restores were bought to avoid.
+        Indoors the list waits for a heal run or a route through town, so a dungeon is finished
+        rather than left for the counter."""
+        self.shopping = shopping_list(self.g.money(), balls, self.g.medicine(), party)
+        restock = any(iid in HP_ITEMS for iid, _ in self.shopping)
+        self.mart_trek = bool(self.shopping) and (balls == 0 and len(party) < PARTY_SIZE
+                                                  or restock and self._outdoors() and self.goal.get("mode") == "travel"
+                                                  and not self._league_leg())
+
+    def _league_leg(self) -> bool:
+        """A travel goal into the Ever Grande endgame maps at the full badge count. No Center or Mart
+        errand leaves this leg while any mon can still attack: the nearest counter is Mossdeep, the
+        whole dungeon back, and the party walked out of Victory Road twice to reach it."""
+        return (self.goal.get("mode") == "travel" and tuple(self.goal.get("to", ())) in planner.ENDGAME_CHAIN
+                and self.g.badges() >= len(planner.ALL_GYMS))
+
+    def _outdoors(self) -> bool:
+        """Standing on a town, route or ocean map, where a counter errand is a short walk; a cave
+        floor or a building is a leg the walk finishes first."""
+        here = self.g.position()[2:]
+        return not rowe_rom.is_indoor(*here) and not rowe_rom.is_underground(*here)
+
     def _retreat_warranted(self, party) -> bool:
         """Whether a hurt party treks to a Center now, grounded in the active goal. A team with no
         mon able to attack always goes, rotation cannot save it. Approaching a gym the whole team
@@ -1654,9 +1785,21 @@ class Player:
         self.event_seq += 1
         print(line, flush=True)
 
+    def _sync_tickets(self, tickets: frozenset) -> None:
+        """Rebuild the graph's ferry layer when the held key-item set changes, so a Sevii ticket
+        handed over mid-run opens that island's mainland dock arm for the next route; the launch-time
+        set kept Two Island off the Slateport dock after Ticket 2 was in the bag and routed the party
+        round through One Island."""
+        if self.graph is None or tickets == self._tickets:
+            return
+        self._tickets = tickets
+        self.graph.set_script(planner.script_layer(tickets))
+        print(f"tickets: {sorted(tickets)}, ferry arms rebuilt", flush=True)
+
     def write_status(self) -> dict:
         """states/status.json, the planner's only view of the game; returns the row written."""
         x, y, group, num = self.g.position()
+        tickets = frozenset(i for i, _q in self.g.key_items())
         party = [party_row(m) for m in self.g.party() if m.level]  # a slot mid-deposit reads level 0
         # the last full roster, what fill_party brings back first after an interrupted swap
         if len(party) == PARTY_SIZE and self.state_path:
@@ -1677,6 +1820,8 @@ class Player:
             "badge_flags": [self.g.flag(S.FLAG_BADGE01 + i) for i in range(S.BADGE_COUNT)],
             "johto_flags": [self.g.flag(S.JOHTO_BADGE01 + i) for i in range(S.JOHTO_BADGE_COUNT)],
             "champion": self.g.flag(S.FLAG_SYS_GAME_CLEAR),
+            "elite_flags": [self.g.flag(f) for f in S.FLAG_DEFEATED_ELITE_4],
+            "boss_flags": [self.g.flag(BOSSES[m][0]) for m in planner.POSTGAME],
             "ferry_flags": {f"0x{f:X}": self.g.flag(f) for f in FERRY_FLAGS},
             "gate_flags": sorted(self._graph_flags()),
             "caught_species": sorted(self.ledger.caught),
@@ -1684,7 +1829,10 @@ class Player:
             "wanted_types": sorted(rowe_rom.TYPE_NAMES[t] for t in self.wanted),
             "battles": self.battles, "wins": self.wins, "caught": self.caught,
             "events": list(self.events), "event_seq": self.event_seq, "exit_reason": self.exit_reason,
+            "tickets": sorted(tickets),
+            "hidden_givers": sorted(list(m) for m in self._gone_givers()),
         }
+        self._sync_tickets(tickets)
         path = os.path.join(os.path.dirname(self.state_path), "status.json")
         with open(path + ".tmp", "w") as f:
             json.dump(status, f, indent=1)
@@ -1729,11 +1877,8 @@ class Player:
             if won > self.goal.get("flags", self.goal.get("badges", 0)):
                 raise GoalExit(f"goal reached: gym cleared, {won} league flags up")
             return
-        if mode == "sevii":
-            # the Sevii leg's routed destination and its badge-flag decode are a later ticket. Until
-            # then the leg maps westward toward the island pass, which nothing here completes, so the
-            # stream stays up instead of halting on an unsupported goal.
-            return
+        if mode == "done":
+            raise GoalExit(DONE_EXIT)
         raise GoalExit(f"unsupported goal {self.goal}")
 
     def _graph_flags(self) -> set:
@@ -1749,7 +1894,7 @@ class Player:
         halt case), or a burst of REPLAN_BURST exits inside REPLAN_WINDOW_S, which is the tight
         loop a relaunch's reload and five-second pause used to pace."""
         status = self.write_status()
-        if self.exit_reason.startswith("unsupported") or self.exit_reason == "no_grass_idle":
+        if self.exit_reason.startswith(("unsupported", "done")) or self.exit_reason == "no_grass_idle":
             return False
         now = time.monotonic()
         self._replans = [t for t in self._replans if now - t < REPLAN_WINDOW_S] + [now]
@@ -1764,6 +1909,9 @@ class Player:
         else:
             self.snapshot(self.state_path)
         self.graph.flags = self._graph_flags()
+        # a giver whose sailor vanished since the graph was built drops out here, so the replan routes
+        # to a present dispatcher instead of the gap a used giver left
+        self.graph.set_script(planner.script_layer(self._tickets, self._gone_givers()))
         goal, why = planner.recommend(status, self.graph)
         print(f"replan: {goal} because {why}", flush=True)
         goal_path = os.path.join(os.path.dirname(self.state_path), "goal.json")
@@ -1830,8 +1978,20 @@ class Player:
             # the Center a few maps over heals the bench for free; bought restores are for travel
             # and the gym approach, where the walk back is the cost
             return
-        for _ in range(len(self.g.party())):
-            low = [m for m in self.g.party() if 0 < m.hp and m.hp * 100 < m.max_hp * HEAL_HP_PERCENT]
+        misses = 0
+        if self._league_leg():
+            # no Center until the Champion falls, so a fainted mon comes back on a Revive here and
+            # the HP loop below tops it up
+            for target in [m for m in self.g.party() if m.hp == 0]:
+                pocket = self.g.medicine()
+                slot = next((i for i, (iid, qty) in enumerate(pocket) if iid in REVIVE_ITEMS and qty > 0), None)
+                if slot is None:
+                    break
+                print(f"  field revive: {rowe_rom.item_name(pocket[slot][0])} on {target.nickname}", flush=True)
+                self.errands.use_hp_item_in_field(slot, target.slot)
+        for _ in range(2 * len(self.g.party()) + 1):
+        # a L100 mon can need two Hyper Potions to clear the line, so the bound is two per mon
+            low = [m for m in self.g.party() if 0 < m.hp and m.hp * 100 < m.max_hp * FIELD_HEAL_PERCENT]
             if not low:
                 return
             target = min(low, key=lambda m: m.hp * 100 // m.max_hp)
@@ -1843,7 +2003,11 @@ class Player:
             print(f"  field heal: {rowe_rom.item_name(iid)} on {target.nickname} {target.hp}/{target.max_hp}", flush=True)
             self.errands.use_hp_item_in_field(slot, target.slot)
             if sum(q for _, q in self.g.medicine()) >= before:
-                return
+                # the Start menu or the bag ate a press; one more try before the recount sends the
+                # party to a Center on a lead the pocket could have patched
+                misses += 1
+                if misses > 1:
+                    return
 
     def next_leader_type(self) -> int | None:
         """Attack/defence type of the next unbeaten gym's leader by the fixed Hoenn order, or None
@@ -2047,19 +2211,66 @@ class Player:
         fall is climbable. A grid built without this check left climb False and hid the upper half
         of any map reached over a waterfall."""
         grid = Grid(self.e)
-        grid.climb = any(item == ITEM_WATERFALL_TOOL for item, _ in self.g.key_items())
+        grid.climb = self._climb()
         return grid
 
-    def _landing_rank(self, hop: tuple, nxt: tuple | None, surf: bool = False):
-        return landing_rank(hop, nxt, surf)
+    def _climb(self) -> bool:
+        return any(item == ITEM_WATERFALL_TOOL for item, _ in self.g.key_items())
 
-    def _cross_to(self, here: tuple, hop: tuple, nxt: tuple | None = None) -> tuple:
+    def _landing_rank(self, hop: tuple, nxt: tuple | None, surf: bool = False, chain: tuple = ()):
+        return landing_rank(hop, nxt, surf, climb=self._climb(), chain=chain)
+
+    def _region_route(self, here: tuple, dest: tuple, blocked: set, moves: frozenset,
+                      dest_tiles: frozenset | None = None) -> list | None:
+        """Region-level steps to dest over the map graph's open edges, None when the layouts do not
+        thread from the tile the player stands on."""
+        x, y = self.g.position()[:2]
+        return region_route.route(here, (x, y), dest, region_route.open_hops(self.graph, here, blocked, moves),
+                                  "SURF" in moves, self._climb(), dest_tiles)
+
+    def _prefer_tiles(self, here: tuple, step) -> frozenset:
+        """A step's trigger tiles as the crossing primitive names them: cross_edge aims at the margin
+        tile past the border, take_warp at the warp tile, which a door pad keeps out of the reach set
+        the step was cut from."""
+        if step.portal.kind == "warp":
+            return frozenset(step.portal.landings)
+        if step.portal.kind != "edge":
+            return step.tiles
+        _, w, h = region_route.grid(here)
+        d = step.portal.direction
+        return frozenset((x, -1) if d == rowe_map.DIR_NORTH else (x, h) if d == rowe_map.DIR_SOUTH
+                         else (-1, y) if d == rowe_map.DIR_WEST else (w, y) for x, y in step.tiles)
+
+    def _door_tiles(self, town: tuple, room: tuple) -> frozenset:
+        """Tiles around the town's doors into room, where a trip to that room has to land."""
+        return frozenset(t for x, y, d in rowe_rom.map_warps(*town) if d == room for t in region_route.around((x, y)))
+
+    def _object_hidden(self, here: tuple, obj: tuple) -> bool:
+        """True when the object template at `obj` on map `here` carries a visibility flag that is
+        currently set, so the ROM has removed it. A field dispatcher's sailor hides this way once its
+        story flag sets, leaving no NPC to talk to."""
+        flag = next((fl for x, y, _mv, fl in rowe_rom.map_objects(*here) if (x, y) == tuple(obj)), 0)
+        return bool(flag) and self.g.flag(flag)
+
+    def _gone_givers(self) -> frozenset:
+        """Seagallop giver maps whose sailor the ROM has removed, their arms dropped from the graph so
+        routing aims at a present dispatcher. A giver's sailor hides once its island is handed its
+        ticket, so these grow as the Sevii leg runs."""
+        gone = {src for src in script_decode.seagallop_docks()
+                if (t := script_decode.giver_sailor_tile(src)) is not None and self._object_hidden(src, t)}
+        return frozenset(gone)
+
+    def _cross_to(self, here: tuple, hop: tuple, nxt: tuple | None = None, chain: tuple = (),
+                  prefer: frozenset = frozenset()) -> tuple:
         """Take the live connection to bordering map `hop`, else its warp. Returns (status,
         result): result "moved" when the map changed, "battle" when a wild battle interrupted
         the walk, "blocked" when the edge could not be reached, which idles frames so the loop
-        keeps feeding the stream. `nxt`, the hop after this one, picks the landing region."""
+        keeps feeding the stream. `nxt`, the hop after this one, picks the landing region and
+        `chain` the maps after nxt that landing must thread; `prefer` holds the trigger tiles a
+        region route named (warp tiles, or border tiles in margin coordinates), tried first."""
         surf = "SURF" in self.field_moves()
-        lr = self._landing_rank(hop, nxt, surf)
+        lr = self._landing_rank(hop, nxt, surf, chain)
+        preferred = (0, -10 ** 6)  # sorts ahead of every real (class, -region size) score
         for c in rowe_map.connections(self.e):
             if (c.group, c.num) == hop:
                 edge_rank = None
@@ -2067,6 +2278,8 @@ class Player:
                     rank, w, h = lr
 
                     def edge_rank(edge: tuple) -> tuple:
+                        if edge in prefer:
+                            return preferred
                         if c.direction in (rowe_map.DIR_NORTH, rowe_map.DIR_SOUTH):
                             return rank((edge[0] - c.offset, h - 1 if c.direction == rowe_map.DIR_NORTH else 0))
                         return rank((w - 1 if c.direction == rowe_map.DIR_WEST else 0, edge[1] - c.offset))
@@ -2078,13 +2291,34 @@ class Player:
                 break
         else:
             ferry_label = script_decode.seagallop_label(here, hop)
-            ferry_obj = script_decode.talk_object(here, hop) if ferry_label is not None else None
-            if ferry_obj is not None:
-                # the Seagallop crossing is a talk, not a step-on warp: the sailor opens a native
-                # scrolling menu whose row text picks the destination, so take_warp finds no tile and
-                # talk_warp drives the menu to the matching row instead.
-                status = self.errands.talk_warp(ferry_obj["obj"], hop, ferry_label)
-                how = "ferry"
+            # a script edge is a talked crossing (a Seagallop sailor or a scripted door), not a
+            # step-on warp: take_warp finds no warp tile and gates it, so route it through talk_warp.
+            # A labeled dest picks that menu row; an unlabeled decodable arm A's through on the
+            # default. The approach tile comes off the object's movement type, not a hardcoded side.
+            # a real step-on door to hop outranks a decoded script edge: the Slateport harbor
+            # entrance warps (0,1)->(9,9) off its own mat, but the greeting script beside the door
+            # also decodes as an edge, and talk_warp then faces the adjacent NPC and presses A at
+            # the follower instead of entering. When the ROM carries a warp tile to hop, step on it.
+            script_door = (ferry_label is None
+                           and hop in script_decode.script_edges().get(here, {})
+                           and not any(d == hop for _x, _y, d in rowe_rom.map_warps(*here)))
+            ferry_obj = (script_decode.talk_object(here, hop)
+                         if (ferry_label is not None or script_door) else None)
+            if ferry_obj is not None and self._object_hidden(here, ferry_obj["obj"]):
+                # the sailor's visibility flag is set, so the ROM removed the object: a field
+                # dispatcher retires when the 0xDF2-0xDF4 flag band sets around 12 badges, and
+                # talk_warp would face the empty tile and press A into nothing for the full streak
+                # (the no_menu loop at (1,9)). Gate the arm so the planner routes via a present
+                # dispatcher or the ticketed mainland dock rather than re-walking to the gap.
+                if self.graph is not None:
+                    self.graph.block(here, hop, self.field_moves(), reason="no_sailor")
+                print(f"  ferry: sailor {ferry_obj['obj']} hidden on {list(here)}, arm gated", flush=True)
+                status, how = "no_sailor", "ferry"
+            elif ferry_obj is not None:
+                status = self.errands.talk_warp(ferry_obj["obj"], hop, ferry_label,
+                                                approach=ferry_obj["approach"],
+                                                surf=surf, tools=self.field_moves())
+                how = "ferry" if ferry_label is not None else "door"
             elif hop in rowe_rom.dive_script_edges().get(here, set()):
                 # here and hop are linked by a setdivewarp the ROM connection table never carries
                 # (Sootopolis (0,7) <-> underwater (24,5)). Surfacing from the seabed emerges on a B
@@ -2101,9 +2335,18 @@ class Player:
                     rank, dest_warps = lr[0], rowe_rom.map_warps(*hop)
 
                     def warp_rank(wp: rowe_map.Warp) -> tuple:
+                        if (wp.x, wp.y) in prefer:
+                            return preferred
                         return rank(dest_warps[wp.dest_warp][:2]) if wp.dest_warp < len(dest_warps) else (2, 0)
                 status = self.errands.take_warp(hop, surf=surf, rank=warp_rank, tools=self.field_moves())
                 how = "warp"
+                if status in ("unreachable", "stuck", "no_warp") and hop in script_decode.script_edges().get(here, {}):
+                    # the map script's setholewarp decodes as a script edge to hop w/ no object to
+                    # talk to: the crossing is a drop through thin ice, and the ladders that also
+                    # warp there sit in the pocket the drop is the way into (Icefall Cave (1,27))
+                    status = self.errands.fall_through(hop, surf=surf, rank=lr[0] if lr is not None else None,
+                                                       tools=self.field_moves())
+                    how = "hole"
         after = self.g.position()[2:]
         if status == "battle":
             result = "battle"
@@ -2142,6 +2385,15 @@ class Player:
         edge lets the frontier exhaust into a grind instead of the party re-treading the dead warp."""
         if self.graph is None:
             return
+        if script_decode.seagallop_label(here, hop) is not None and status != "locked":
+            # a Seagallop ferry arm's passability is the talk_warp menu drive, not a walkable border,
+            # so a drive that missed (no_menu, stuck, wrong_map, unreachable because the sailor was
+            # out of reach this run) is a driver miss the next run retries, never a dead edge. Only a
+            # row drawn locked (island not open yet, status "locked") is a real gate, kept below under
+            # script_no_go. Without this a menu-drive miss tallies to STUCK_GATE and blocks the arm as
+            # "stuck", or _border_open reads it "unreachable" and gates it for good, so route returns
+            # None and the arm has to be hand-unblocked every run it re-poisons.
+            return
         if status == "locked":
             # a native menu row drawn locked (a Seagallop island not yet open) holds the field with a
             # no-go box and never moves the party, reporting the same every run, so the ferry script
@@ -2152,8 +2404,12 @@ class Player:
             # no path from where the player stands: a border the ROM layout reads shut (no_warp,
             # unreachable, or a dormant dive) is gated for good under that reason, any other is a
             # region miss the run-local _stuck already holds and never counts toward the gate
-            # (Route 134 gated both exits from one pocket)
+            # (Route 134 gated both exits from one pocket). A script-edge crossing (a Seagallop
+            # sailor the walk cannot reach) has no connection or warp tile, so _border_open reads
+            # None; gate it under "unreachable" so route abandons it instead of re-picking it.
             reason = self._border_open(here, hop)
+            if reason is None and hop in script_decode.script_edges().get(here, {}):
+                reason = "unreachable"
             if reason in ("no_warp", "unreachable", "script_no_go"):
                 self.graph.block(here, hop, self.field_moves(), reason=reason)
             return
@@ -2261,17 +2517,23 @@ class Player:
         x, y, group, num = self.g.position()
         return (group, num) + self._grid().region((x, y), "SURF" in self.field_moves())
 
-    def _after_cross(self, region: tuple, hop: tuple, crossed: tuple) -> None:
+    def _after_cross(self, region: tuple, hop: tuple, crossed: tuple, dest: tuple | None = None) -> None:
         """Remember what the crossing taught about this area: a hop w/ no path or warp is dead
         for the run, a mid-walk stuck is dropped at the next battle, and a hop that moved is
-        kept so landing back in this same area can retire it."""
+        kept so landing back in this same area can retire it. `dest` is the travel target the hop
+        served, None off an explore step."""
         status, result = crossed
         if result == "moved":
             # a crossing straight back to the area the last hop left keeps that record, so
             # the landing retires the door instead of the return trip erasing it
-            back = self._last_hop is not None and self._last_hop[0][:2] == hop and self._last_hop[1] == region[:2]
+            # a return hop that served another dest (the service town of a heal run, after the
+            # outbound hop served the gym) is a detour, so the outbound hop stays the way on
+            # instead of being retired as a bounce ((1,26) off Four Island, 12 crossings of nothing)
+            back = (self._last_hop is not None and self._last_hop[0][:2] == hop and self._last_hop[1] == region[:2]
+                    and (dest is None or dest == self._last_hop_dest))
             if not back:
                 self._last_hop = (region, hop)
+                self._last_hop_dest = dest
             # the walk itself bringing the player back is the record _blocked_from retires the
             # hop on; an errand's return leaves it False so a route map left for a heal stays open
             self._returned = back
@@ -2285,8 +2547,10 @@ class Player:
             # a landing area w/ no way on except back across this border is a dead end for the
             # area it was entered from, whatever the rest of the map connects to: Route 104's
             # north half enters Petalburg on a pond-locked corner that reaches no door and no
-            # other edge, so the walk bounced between the two maps until the budget ran out
-            if exits == {region[:2]}:
+            # other edge, so the walk bounced between the two maps until the budget ran out. A dock's
+            # ferry arms are graph neighbors the walkable exits never list (the Slateport harbor lands
+            # w/ exits {(0,1)} and eight island arms), so a map w/ an arm on is no dead end
+            if exits == {region[:2]} and (self.graph is None or self.graph.neighbors(here) <= {region[:2]}):
                 self._blocked.setdefault(region, set()).add(hop)
                 print(f"dead end: {list(hop)} entered from {list(region[:2])} reaches nothing else, blocked", flush=True)
             # a loop longer than the 2-map bounce above: Slateport -> water -> back, three maps the
@@ -2337,8 +2601,10 @@ class Player:
             # from (Scorched Slab off Route 120, whose other exit the route never reached, 100
             # round trips); a route map left for a heal detour (Route 110 from Slateport) has
             # other borders, returns by errand, and stays the way toward the goal
-            if self.graph is None or self.graph.neighbors(hop) <= {region[:2]} or self._returned:
+            if self.graph is None or self.graph.neighbors(hop) <= {region[:2]}:
                 self._blocked.setdefault(region, set()).add(hop)
+            elif self._returned:
+                self._bounced.setdefault(region, set()).add(hop)
             if self._returned:
                 n = self._bounces[(region, hop)] = self._bounces.get((region, hop), 0) + 1
                 if n >= BOUNCE_STREAK and self.graph is not None:
@@ -2358,16 +2624,17 @@ class Player:
                         self.graph.block(region[:2], hop, self.field_moves(), reason="bounce")
                         print(f"bounce block: {n} round trips {list(region[:2])} <-> {list(hop)}, border marked dead, next exit", flush=True)
             self._last_hop = None
-        return self._blocked.get(region, set()) | self._stuck.get(region, set())
+        return self._blocked.get(region, set()) | self._bounced.get(region, set()) | self._stuck.get(region, set())
 
-    def service_town(self, here: tuple) -> tuple:
-        """The town whose Center and Mart serve the party from here: the one it stands in or
-        inside, else the fewest map hops away, a tie going to the town whose border is the
-        shorter walk across this map. Oldale when nothing known reaches a town."""
+    def service_town(self, here: tuple, mart: bool = False) -> tuple:
+        """The town whose Center (and Mart, when `mart`) serves the party from here: the one it
+        stands in or inside, else the fewest map hops away, a tie going to the town whose border is
+        the shorter walk across this map. Oldale when nothing known reaches a town."""
+        towns = {t for t, rooms in SERVICE.items() if rooms[1] is not None} if mart else set(SERVICE)
         for town, maps in SERVICE_MAPS.items():
-            if here in maps:
+            if here in maps and town in towns:
                 return town
-        tier = self.graph.nearest_all(here, SERVICE, self._blocked_from(self.region()))
+        tier = self.graph.nearest_all(here, towns, self._blocked_from(self.region()))
         if not tier:
             return OLDALE
         x, y, _, _ = self.g.position()
@@ -2390,7 +2657,12 @@ class Player:
         print(f"leave dynamic interior {list(here)} -> {r} at {self.g.position()[:2]}", flush=True)
         return r in ("map_changed", "battle")
 
-    def travel_toward(self, dest: tuple) -> None:
+    def travel_toward(self, dest: tuple, dest_tiles: frozenset | None = None) -> None:
+        """One crossing toward dest. A region route over the ROM layouts picks the hop and the exact
+        door when the layouts thread from the player's tile, so a map split in two (Ever Grande's
+        shore and plateau, Victory Road 1F's halves) is crossed on the half the next hop starts
+        from; the map-level route is the fallback. `dest_tiles` makes the arrival half the one that
+        reaches those tiles, a town's Center door on a heal trip."""
         here = self.g.position()[2:]
         if here == dest:
             raise GoalExit(f"goal reached: arrived at map {list(dest)}")
@@ -2411,12 +2683,39 @@ class Player:
         # the rest of the budget
         goal_before = self.goal.get("mode")
         blocked = self._blocked_from(region) - {dest}
+        back = set()
+        if (self._last_hop and self._last_hop[1] == here and self._last_hop[0][:2] != dest
+                and self._last_hop_dest == dest):
+            # the map just left is a first hop only when nothing else routes on (the retake below),
+            # so a chain that re-enters its origin deeper down (Mt. Ember's summit path) is walked
+            # forward instead of straight back into the region that routed here. Only a hop toward
+            # this same dest counts: the hop that ended a heal detour served the service town, and
+            # blocking it sent the gym route out Slateport's far side and round through Route 110
+            back = {self._last_hop[0][:2]}
+            blocked = blocked | back
         if goal_before != "grind" and self.goal.get("mode") == "grind":
             # _blocked_from demoted a bounced sole door to a grind hold, so let the next tick
             # dispatch that grind rather than crossing once more toward the abandoned goal
             return
         moves = self.field_moves()
         self.graph.cur_badges = self.g.badges()
+        steps = self._region_route(here, dest, blocked, moves, dest_tiles)
+        bounced = self._bounced.get(region, set())
+        if steps is None and (back or bounced):
+            # the map just left is the way on when the route re-enters it on another half: Victory
+            # Road B2F leads back up into B1F's north half, the one its south-half ladder never reached.
+            # A hop that led straight back earlier in the run is the same case (a heal trip walked
+            # B1F -> B2F -> B1F on purpose), so the bounce memory is for the map-level fallback only
+            steps = self._region_route(here, dest, blocked - back - bounced, moves, dest_tiles)
+        if steps:
+            first, onward = steps[0], tuple(s.dest for s in steps[1:])
+            print(f"hop: {list(here)} region {list(region[2:])} -> dest {list(dest)}: region route {list(first.dest)} "
+                  f"by {first.portal.kind} {sorted(first.tiles)[:2]}, {len(steps)} crossings, "
+                  f"blocked {sorted(list(b) for b in blocked)}", flush=True)
+            crossed = self._cross_to(here, first.dest, onward[0] if onward else None, chain=onward[1:],
+                                     prefer=self._prefer_tiles(here, first))
+            self._after_cross(region, first.dest, crossed, dest=dest)
+            return
         route_hop = self.graph.route(here, dest, blocked, moves)
         if route_hop is None and self.goal.get("mode") == "travel":
             print(f"warn: no graph route {list(here)} -> {list(dest)} under moves {sorted(moves)} "
@@ -2443,7 +2742,7 @@ class Player:
             raise GoalExit(f"travel stuck: no route from {list(here)} to {list(dest)}, re-planning")
         nxt = self.graph.route(hop, dest, field_moves=moves) if hop != dest else None
         print(f"hop: {list(here)} region {list(region[2:])} -> dest {list(dest)}: route {list(hop)} onward {nxt and list(nxt)}, blocked {sorted(list(b) for b in blocked)}", flush=True)
-        self._after_cross(region, hop, self._cross_to(here, hop, nxt))
+        self._after_cross(region, hop, self._cross_to(here, hop, nxt), dest=dest)
 
     def explore_step(self) -> None:
         here = self.g.position()[2:]
@@ -2552,11 +2851,15 @@ class Player:
         drops the stream; a grassless dead-end (the one-connection surf pocket off map 24) spawns no
         wild battle, so the grind routes to the nearest reachable grass map rather than idle a
         grassless frame."""
-        if self.g.badges() >= len(planner.GYM_BADGE):
-            self.goal, note = planner.sevii_goal(self.graph, self.field_moves())
+        status = self.write_status() if self.g.badges() >= len(planner.GYM_BADGE) else None
+        if status is not None and any(g in planner.JOHTO_GYM for g in planner.unbeaten_gyms(status)):
+            self.goal, note = planner.sevii_goal(self.graph, self.field_moves(), status)
             self._held = None
-            msg = f"frontier gated at {list(here)}, 8 badges, {note}"
+            msg = f"frontier gated at {list(here)}, {status['badges']} badges, {note}"
         else:
+            # below 8 badges, and at 16 w/ every gym beaten: an explore goal recommend hands back here
+            # is the one the gated frontier just refused, so re-deciding it each tick ran 7163 demotes
+            # w/ no frame between them; the grind hold runs frames until the supervisor replans
             x, y, _, _ = self.g.position()
             grid = self._grid()
             reach = grid.reachable((x, y), "SURF" in self.field_moves())
@@ -2632,14 +2935,27 @@ class Player:
         print(f"item: ball {(bx, by)} on {list(here)} -> {r}, collected {got}", flush=True)
         return True
 
+    def _observe_here(self, here: tuple) -> None:
+        """Fold the map the party stands on into the graph, warp-linked exits included. ROM
+        edge-connections alone miss a warp-only neighbour: the Three Island arrival map (2,9) has
+        no connection and reaches the mainland only through the sailor-door warp, so a map entered
+        that way keeps an empty adjacency, which the sevii_goal empty-adj frontier test reads as an
+        unmapped onward map and targets as explore-to-self. _landing_exits carries both the edge
+        borders and the reachable warp destinations off the live grid."""
+        if self.graph is None or here == self._last_obs:
+            return
+        new = self.graph.observe(here, list(self._landing_exits()))
+        self._last_obs = here
+        if new:
+            print(f"map: {list(here)} borders {[list(n) for n in sorted(self.graph.adj[here])]}, {len(self.graph.visited)} maps seen", flush=True)
+
     def overworld_step(self, i: int) -> None:
+        if self.goal.get("mode") == "done":
+            # the Champion is beaten; the default branch below would walk the Hall of Fame toward Route 101
+            raise GoalExit(DONE_EXIT)
         x, y, group, num = self.g.position()
         here = (group, num)
-        if self.graph is not None and here != self._last_obs:
-            new = self.graph.observe(here, [(c.group, c.num) for c in rowe_map.connections(self.e)])
-            self._last_obs = here
-            if new:
-                print(f"map: {list(here)} borders {[list(n) for n in sorted(self.graph.adj[here])]}, {len(self.graph.visited)} maps seen", flush=True)
+        self._observe_here(here)
         slot = self.lowest_lead()
         if slot is not None and not self.need_heal and self.swap_failures < 3:
             ok = self.errands.lead_with(slot)
@@ -2655,16 +2971,23 @@ class Player:
         if not self.need_heal and self.state_path and os.path.exists(self.state_file("swap_order.json")):
             print("swap order on file, Center trip to run it", flush=True)
             self.need_heal = True
-        in_goal_gym = self.goal.get("mode") == "gym" and here == tuple(self.goal.get("map", ()))
+        # the gym's annex maps count: on Eight Island's (2,21) a heal trek routed back through the
+        # leader floor (2,15), where the trek was dropped and the pad chain warped it out again
+        in_goal_gym = self.goal.get("mode") == "gym" and here in gym_map_set(tuple(self.goal.get("map", ())))
         if self.need_heal and in_goal_gym:
             # the gym's inner rooms have no walking path back to its exit, so a heal trip from
             # one jams on the warp; the leader fight runs on what is left, and a whiteout heals
             # at the Center and the sweep re-takes the open doors from the entrance
             self.need_heal = False
+        if self.need_heal and self._league_leg() and any(can_attack(m) for m in self.g.party() if m.hp > 0):
+            # the same hold on the League leg: a fainted lead or a thin pocket is fought through on
+            # the bench, since every counter from here is Victory Road walked back
+            self.need_heal = False
         if self.need_heal:
-            town = self.service_town(here)
+            # a pending buy sends the heal to a Mart town so the restock follows next door
+            town = self.service_town(here, mart=bool(self.shopping))
             if here not in SERVICE_MAPS[town]:
-                self.travel_toward(town)
+                self.travel_toward(town, self._door_tiles(town, SERVICE[town][0]))
                 return
             r = self.errands.heal_at(town, SERVICE[town][0], after_heal=self.after_heal, surf="SURF" in self.field_moves())
             print(f"heal run -> {r} at {self.g.position()}", flush=True)
@@ -2677,7 +3000,7 @@ class Player:
             # water): hold need_heal and fall through to normal nav so the player moves off this
             # spot instead of re-running the same blocked warp every step
         if self.shopping:
-            town = self.service_town(here)
+            town = self.service_town(here, mart=True)
             if here in SERVICE_MAPS[town]:
                 bought = self.errands.restock_at(town, SERVICE[town][1], self.shopping, surf="SURF" in self.field_moves(), downgrade=HP_TIERS)
                 print(f"restock -> {bought} at {self.g.position()}", flush=True)
@@ -2691,14 +3014,16 @@ class Player:
                 # normal nav so the player moves off the spot instead of re-running the blocked warp
                 self.mart_trek = False
             if self.mart_trek:
-                self.travel_toward(town)
+                self.travel_toward(town, self._door_tiles(town, SERVICE[town][1]))
                 return
+        if self.league_step(here) or self.boss_step(here):
+            return
         if self.collect_step():
             return
         if self.goal.get("mode") == "travel":
             self.travel_toward(tuple(self.goal.get("to", ())))
             return
-        if self.goal.get("mode") in ("explore", "sevii"):
+        if self.goal.get("mode") == "explore":
             self.explore_step()
             return
         if self.goal.get("mode") == "gym":
@@ -2711,8 +3036,8 @@ class Player:
         if (group, num) == LITTLEROOT:
             print(f"north out of Littleroot -> {self.errands.cross_edge(rowe_map.DIR_NORTH)}", flush=True)
             return
-        for town, rooms in SERVICE.items():
-            if (group, num) in rooms:
+        for town, maps in SERVICE_MAPS.items():
+            if (group, num) in maps - {town}:
                 self.dismiss_text()
                 print(f"leave building {(group, num)} -> {self.errands.leave_by_warp(town)}", flush=True)
                 return
@@ -2746,6 +3071,63 @@ class Player:
             self.dismiss_text()
             self.run(20, PACE[i % len(PACE)])
             self.run(4)
+
+    def league_step(self, here: tuple) -> bool:
+        """The Elite Four gauntlet on the League leg. On the lobby: heal at the nurse and buy the
+        League list before Hall 5. In a room whose win flag is down: walk at the trainer and talk
+        until the fight opens, since the door behind is shut and the graph has no route past the
+        trainer. In a room already won: take the far door on to the next hall. True when a step
+        ran here, False when the regular travel step should take it."""
+        if not self._league_leg():
+            return False
+        if here == LEAGUE_LOBBY and not self._lobby_stocked:
+            healed = self.errands.talk_to_nurse(LOBBY_NURSE_STAND)
+            wants = league_shopping_list(self.g.money(), self.g.medicine())
+            bought = self.errands.buy_at_counter(LOBBY_CLERK_STAND, wants, face=eb.KEY_UP) if wants else {}
+            self._lobby_stocked = True
+            print(f"league lobby: nurse {healed}, bought {bought} at {self.g.position()[:2]}", flush=True)
+            return True
+        flag = ELITE_FLAGS.get(here)
+        if flag is None:
+            return False
+        if not self.g.flag(flag):
+            r = self.errands.challenge_leader(ELITE_STAND)
+            print(f"league: {planner.ENDGAME_ROOMS[here]} -> {r} at {self.g.position()[:2]}", flush=True)
+            if r != "battle":
+                self.dismiss_text()
+            return True
+        nxt = planner.ENDGAME_CHAIN[planner.ENDGAME_CHAIN.index(here) + 1]
+        r = self.errands.take_warp(nxt)
+        print(f"league: {planner.ENDGAME_ROOMS[here]} won, door to {list(nxt)} -> {r} at {self.g.position()[:2]}", flush=True)
+        return r in ("map_changed", "battle")
+
+    def cutscene_step(self) -> bool:
+        """Off the field and out of battle (the Hall of Fame screen, the credits, the title screen
+        and its Continue menu after the game clear): one A press and 50 frames, True. The field
+        comes back at the player's house, where the post-game goal picks up."""
+        cb2 = self.g.callback2()
+        # the field callback shows for a moment while Continue loads the save, before the party is
+        # readable; an empty party off a field read is still the cutscene (the live crash was
+        # lowest_lead on party[0] there)
+        if self.g.in_battle() or (cb2 == S.CB2_OVERWORLD and self.g.party()):
+            return False
+        if cb2 != self._cutscene_cb2:
+            self._cutscene_cb2 = cb2
+            print(f"cutscene: cb2 {cb2:#x}, pressing A through it", flush=True)
+        self.tap(eb.KEY_A)
+        self.run(50)
+        return True
+
+    def boss_step(self, here: tuple) -> bool:
+        """A post-game boss room whose defeat flag is down: walk at the trainer and talk until the
+        fight opens. True when a step ran here."""
+        if here not in BOSSES or self.g.flag(BOSSES[here][0]):
+            return False
+        r = self.errands.challenge_leader(BOSSES[here][1])
+        print(f"boss: {list(here)} -> {r} at {self.g.position()[:2]}", flush=True)
+        if r != "battle":
+            self.dismiss_text()
+        return True
 
     def gym_step(self) -> None:
         """Inside the gym walk at the leader and talk; the trainers on the way interrupt with
@@ -2785,6 +3167,10 @@ class Player:
                     self.dismiss_text()
                     return
             if here != gym:
+                r = self.errands.take_warp_chain(self.gym_stand(), gym, gym_maps)
+                print(f"gym: warp chain -> {r} at {self.g.position()}", flush=True)
+                if r in ("warped", "battle"):
+                    return
                 r = self.errands.gym_sweep(self.gym_stand(), done, gym_maps)
                 print(f"gym: sweep -> {r} at {self.g.position()[:2]}, {len(done)} done", flush=True)
                 if r == "battle":
@@ -2820,7 +3206,12 @@ class Player:
             # Mauville's gates open from its floor switches, Petalburg is rooms linked by doors, and
             # a trainer standing in a one-tile gap blocks Rustboro's aisle. Fight the trainers in
             # reach, stand on the switches and take the gym's own doors one per step, re-trying the
-            # leader each time.
+            # leader each time. A gym spread over maps by warp pads searches the pad chain first.
+            if len(gym_maps) > 1:
+                r = self.errands.take_warp_chain(stand, gym, gym_maps)
+                print(f"gym: warp chain -> {r} at {self.g.position()}", flush=True)
+                if r in ("warped", "battle"):
+                    return
             r = self.errands.gym_sweep(stand, done, gym_maps)
             print(f"gym: sweep -> {r} at {self.g.position()[:2]}, {len(done)} done", flush=True)
             if r == "battle":
@@ -2899,6 +3290,9 @@ class Player:
         gym and the gym goal would otherwise walk back and re-fight the same team until the budget
         ran out. The after_heal swap already runs on the Center trip the whiteout forces; after
         GYM_LOSS_CAP losses the gym is recorded closed so the ladder routes past it."""
+        if outcome in (OUTCOME_LOST, OUTCOME_DREW):
+            # the whiteout respawns on the League lobby, where the counter is worth a second visit
+            self._lobby_stocked = False
         if outcome not in (OUTCOME_LOST, OUTCOME_DREW) or self.goal.get("mode") != "gym":
             return
         gym = tuple(self.goal.get("map", ()))
@@ -2918,9 +3312,8 @@ class Player:
 
     def _apply_speed_ctl(self, states_dir: str) -> None:
         """Pick up a speed change the control endpoint wrote to speed.ctl and pass
-        it to the streamer, which re-spawns the encoder. Keyed on mtime so an
-        unchanged file costs one stat per loop and the encoder bounces only on an
-        actual change."""
+        it to the streamer, which moves the decimation ratio on its next frame.
+        Keyed on mtime so an unchanged file costs one stat per loop."""
         path = os.path.join(states_dir, "speed.ctl")
         try:
             mtime = os.path.getmtime(path)
@@ -2950,8 +3343,10 @@ class Player:
         if self.state_path:
             states_dir = os.path.dirname(self.state_path)
             self.goal = read_goal(os.path.join(states_dir, "goal.json"))
+            self._tickets = frozenset(i for i, _q in self.g.key_items())
             self.graph = planner.build_graph(os.path.join(states_dir, "map_graph.json"),
-                                             flags=self._graph_flags())
+                                             flags=self._graph_flags(), tickets=self._tickets,
+                                             hidden=self._gone_givers())
             self._stuck_hits = self._load_stuck_hits(os.path.join(states_dir, "stuck_hits.json"))
         # points accrue at trainer-level milestones and the supervisor relaunches often enough
         # that a launch-time spend keeps them from piling up unspent; once per process, since
@@ -2959,6 +3354,10 @@ class Player:
         if not self._skills_spent and not self.g.in_battle():
             self.errands.spend_skill_points()
             self._skills_spent = True
+        if not self.g.in_battle():
+            # a run that starts on the shore w/ a thin pocket walks to the counter before the
+            # dungeon instead of waiting for its first battle to find the list
+            self._plan_shopping(self.g.party(), dict(self.g.poke_balls()).get(catch.POKE_BALL, 0))
         while time.monotonic() < end and not self.stop:
             if self.state_path:
                 # the site holds each row until the stream frame it belongs to has played, so a
@@ -2967,10 +3366,14 @@ class Player:
                 # frame, the periodic write covers a long walk w/ nothing changing
                 sig = tuple((m.species, m.level, m.hp, m.experience, m.pp) for m in self.g.party())
                 since = time.monotonic() - self.last_status
-                if since > STATUS_SECONDS or (sig != self._status_sig and since > 0.5):
+                # an empty party is the credits or the title screen, where every save-block read is
+                # junk; a status written there crashed planner.py --apply on party[0]
+                if sig and (since > STATUS_SECONDS or (sig != self._status_sig and since > 0.5)):
                     self._status_sig = sig
                     self.write_status()
                 self._apply_speed_ctl(states_dir)
+            if self.cutscene_step():
+                continue
             if self.g.in_battle():
                 if not in_battle:
                     in_battle = True
@@ -2981,6 +3384,8 @@ class Player:
                     self._wedge_sig = None
                     self._switch_active = None  # new battle, let this battle's lead try a switch
                     self._wild_switched = False
+                    self._used_slots = {}
+                    self._switched_in = set()
                     self._start_items = {}
                     self._avoid_slots = set()
                     self._freezes = 0
@@ -3003,24 +3408,27 @@ class Player:
                         self.note_gym_loss(outcome)
                     balls = dict(self.g.poke_balls()).get(catch.POKE_BALL, 0)
                     party = self.g.party()
-                    self.shopping = shopping_list(self.g.money(), balls, self.g.medicine(), party)
-                    # a counter trip on its own only for an empty ball pocket w/ a party to fill;
-                    # everything else is bought when a heal run or the route already passes a town
-                    self.mart_trek = bool(self.shopping) and balls == 0 and len(party) < PARTY_SIZE
+                    self._plan_shopping(party, balls)
                     low = [m for m in party if m.hp * 100 < m.max_hp * HEAL_HP_PERCENT]
                     # two mons under the heal line is a Center trip on its own; one is worth it when
                     # the Mart next door is the destination anyway
-                    center_trip = len(low) >= 2 or (low and self.shopping) or self._retreat_warranted(party)
+                    # the one-low-mon case rides on the Mart being next door; from a cave floor
+                    # the Mart town is the dungeon walked back, so the rotation leads the next able
+                    # mon and the leg goes on
+                    errand = bool(self.shopping) and self._outdoors()
+                    center_trip = len(low) >= 2 or (low and errand) or self._retreat_warranted(party)
                     mon = party[0]
                     ferry = " ".join(f"{f:03X}:{int(self.g.flag(f))}" for f in FERRY_FLAGS)
                     self.say(f"{self.wins}/{self.battles} won, {self.caught} caught, {mon.nickname} L{mon.level} {mon.hp}/{mon.max_hp} exp {mon.experience}, balls {balls}, badges {self.g.badges()}, map {self.g.position()[2:]}, ferry {ferry}")
                     self.dismiss_text()
-                    if center_trip:
-                        # the bag's HP items cover the bench first, so the Center trip only fires
-                        # when nothing in the Medicine pocket helps (or a mon fainted and needs a Revive)
+                    # the bag's HP items cover the bench first, so the Center trip only fires when
+                    # nothing in the Medicine pocket helps (or a mon fainted and needs a Revive); the
+                    # top-off runs above the trip line so a travel leg is fought on bought restores
+                    if any(0 < m.hp and m.hp * 100 < m.max_hp * FIELD_HEAL_PERCENT for m in party):
                         self.heal_bench_from_bag()
+                    if center_trip:
                         low = [m for m in self.g.party() if m.hp * 100 < m.max_hp * HEAL_HP_PERCENT]
-                        if len(low) >= 2 or (low and self.shopping) or self._retreat_warranted(self.g.party()):
+                        if len(low) >= 2 or (low and errand) or self._retreat_warranted(self.g.party()):
                             self.need_heal = True
                     # NPCs wandered through the battle, so an edge they plugged may be open
                     self._stuck.clear()
@@ -3060,7 +3468,9 @@ def drive(player: Player, seconds: float) -> None:
     while True:
         try:
             player.loop(deadline - time.monotonic())
-            player.exit_reason = "timer"
+            # a TERM sets stop and the loop returns the same way a spent budget does; the signal
+            # exit keeps the last snapshot instead of writing wherever the stop landed
+            player.exit_reason = "signal" if player.stop else "timer"
             return
         except GoalExit as g:
             player.exit_reason = str(g)
@@ -3077,7 +3487,13 @@ def main() -> None:
     ap.add_argument("--speed", type=int, default=1)
     a = ap.parse_args()
     rowe_rom.self_check()
-    emu = eb.Emu()
+    # flash save beside the state file: the Hall of Fame saves the game there and the title
+    # screen's Continue loads it back, w/o it the main menu offers New Game only
+    sav = a.state + ".sav"
+    if not os.path.exists(sav):
+        with open(sav, "wb") as f:
+            f.write(b"\xff" * FLASH_BYTES)
+    emu = eb.Emu(save=sav)
     with open(a.state, "rb") as f:
         emu.load_state(f.read())
     streamer = NullStreamer() if a.no_stream else FrameStreamer(emu.core, speed=a.speed)

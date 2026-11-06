@@ -12,17 +12,32 @@ map it was entered from, onto a part of it the player could not walk to (Route
 source through such a map and only such a map. A `blocked` set applies only to
 the first hop, the one taken from where the player stands now.
 """
+import hashlib
 import json
 import os
 
 Node = tuple  # (map_group, map_num)
 MAP_DYNAMIC = (127, 127)  # a dynamic-warp header: no edge, the real dest resolves at runtime
 
-# The executor's crossing-primitive generation. Bump when a crossing primitive lands (an NPC-talk
-# warp, a descent link, the live-grid border read). A gate recorded below the current version
-# predates such a fix, so _gate_shut reads it open and the walker retries the crossing once; a fresh
-# failure re-records it at the current version. Pre-version gates on disk load as version 0.
-EXECUTOR_CAP_VERSION = 6
+
+def _source_version(paths) -> str:
+    """A token over the navigation sources' bytes. Editing any of them changes the token, so every
+    gate recorded under the old bytes reads as a different version and _gate_shut grants it one retry."""
+    h = hashlib.sha256()
+    for p in sorted(paths):
+        with open(p, "rb") as f:
+            h.update(f.read())
+    return "src:" + h.hexdigest()[:12]
+
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+# The crossing and routing modules. A gate carries the token of the sources that recorded it; editing
+# any of these to fix a wedge changes the token, so _gate_shut reads the stale gate open and the walker
+# retries the crossing once instead of the gate needing a manual cache clear. A fresh failure re-records
+# it under the new token. Pre-token gates on disk load as version 0, which never matches, so they retry.
+EXECUTOR_CAP_VERSION = _source_version(
+    os.path.join(_HERE, n) for n in
+    ("play.py", "map_graph.py", "script_decode.py", "planner.py", "routines.py", "nav.py"))
 
 
 def _key(node: Node) -> str:
@@ -36,7 +51,7 @@ def _node(key: str) -> Node:
 
 class MapGraph:
     def __init__(self, path: str, world: dict | None = None, passthrough: dict | None = None,
-                 script: dict | None = None, flags: set | None = None):
+                 script: dict | None = None, flags: set | None = None, ferry_hubs: set | None = None):
         self.path = path
         self.adj: dict[Node, set[Node]] = {}
         self.visited: set[Node] = set()
@@ -49,9 +64,17 @@ class MapGraph:
         self.passthrough: dict = {k: set(v) for k, v in (passthrough or {}).items()}
         # NPC-interaction warps (script_decode.script_edges): a dest is a neighbor only while its
         # gate flags are all set, so the Seagallop ferry opens the Sevii block once its flag is earned.
-        self.script: dict = {k: {d: frozenset(f) for d, f in v.items()} for k, v in (script or {}).items()}
+        self.set_script(script or {})
         self.flags: set = set(flags or ())
+        # Seagallop dock maps: a walk onto one is always a valid board, its onward reach is the
+        # ferry menu drive, so a walk-bounce there is a driver miss _gate_shut must never seal.
+        self.ferry_hubs: set = set(ferry_hubs or ())
         self.load()
+
+    def set_script(self, script: dict) -> None:
+        """Replace the script-warp layer, whole: it is a function of the held key items, so a Sevii
+        ticket handed over mid-run re-derives it rather than patching one arm."""
+        self.script: dict = {k: {d: frozenset(f) for d, f in v.items()} for k, v in script.items()}
 
     def load(self) -> None:
         if not os.path.exists(self.path):
@@ -112,14 +135,16 @@ class MapGraph:
 
     def _gate_shut(self, here: Node, nb: Node, field_moves) -> bool:
         """An edge stays shut only while the field-move set and the badge count that recorded it
-        both hold, so gaining an HM or a badge reopens it. A gate recorded by an older executor
-        (gate_version below EXECUTOR_CAP_VERSION) predates a crossing-primitive fix, so it reads
-        open and the walker retries the crossing once; a fresh failure re-records it at the current
-        version. A gate set directly in a test carries no version and is treated as current."""
+        both hold, so gaining an HM or a badge reopens it. A gate whose version differs from the
+        current source token was recorded under different navigation code, so it reads open and the
+        walker retries the crossing once; a fresh failure re-records it at the current token. A gate
+        set directly in a test carries no version and is treated as current."""
+        if nb in self.ferry_hubs:
+            return False
         edge = (here, nb)
         if self.gated.get(edge) != field_moves:
             return False
-        if self.gate_version.get(edge, EXECUTOR_CAP_VERSION) < EXECUTOR_CAP_VERSION:
+        if self.gate_version.get(edge, EXECUTOR_CAP_VERSION) != EXECUTOR_CAP_VERSION:
             return False
         return self.gate_badges.get(edge, self.cur_badges) == self.cur_badges
 
@@ -136,19 +161,34 @@ class MapGraph:
             if first is not None and is_goal(cur):
                 return first
             for nb in sorted(self.neighbors(cur)):
-                if first is None and nb in blocked:
+                # a map's world layer can list itself (Four Island's in-map warps), and a hop onto
+                # the map the walk stands on is no hop: with the real exit blocked it came back as
+                # the route and the walk re-crossed nothing 12 times to an explore-cycle exit
+                if first is None and (nb in blocked or nb == src):
                     continue
                 if self._gate_shut(cur, nb, field_moves):
                     continue
-                if nb == src and src not in self.passthrough.get(cur, ()):
+                # a one-map return (a house door) leads back to where the walk left; a chain of two
+                # or more maps that lands back on src joins two regions of it the same way a
+                # pass-through does (Mt. Ember's summit path (1,20) -> (33,10) -> (33,11) -> (33,8))
+                if nb == src and cur == first and src not in self.passthrough.get(cur, ()):
                     continue
-                if nb not in seen:
-                    seen.add(nb)
-                    frontier.append((nb, nb if first is None else first))
+                # seen per first hop, since the same map reached as a first hop is a dead end for
+                # the return above but reached deeper down a chain is the way back in
+                key = (nb, nb if first is None else first)
+                if key not in seen:
+                    seen.add(key)
+                    frontier.append(key)
         return None
 
     def route(self, src: Node, dst: Node, blocked=frozenset(), field_moves=frozenset()) -> Node | None:
         return self._bfs(src, lambda n: n == dst, blocked, field_moves)
+
+    def passable(self, node: Node, blocked=frozenset(), field_moves=frozenset()) -> set:
+        """Neighbours a walk may hop to from node now: not node itself, not blocked this run, not
+        shut under the field-move set."""
+        return {nb for nb in self.neighbors(node)
+                if nb != node and nb not in blocked and not self._gate_shut(node, nb, field_moves)}
 
     def nearest(self, src: Node, dests, blocked=frozenset()) -> Node | None:
         """The member of dests the fewest hops from src, src itself when it is one, else None."""

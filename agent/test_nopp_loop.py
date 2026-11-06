@@ -13,8 +13,14 @@ import types
 
 import emu_boot as eb
 import play
+import rowe_symbols as S
 
 IDLE = next(iter(play.INTRO_IDLE_FUNCS))  # a controller func the no-PP box and parked list run under
+UNKNOWN_FUNC = 0x084F7000  # a controller func in no symbol set, the shape every new ROM handler takes first
+
+
+def _battle_main(self):
+    return S.CB2_BATTLE_MAIN
 
 
 def _player(g) -> play.Player:
@@ -36,6 +42,8 @@ class _BoxG:
     """Selection-script box up (comm 6) under the idle controller. _comm_action taps B each pass;
     once the box has cleared the controller returns to the action pick (choosing True), so the intro
     loop returns without ever tapping A into the box."""
+    callback2 = _battle_main
+
     def __init__(self):
         self._reads = 0
 
@@ -55,6 +63,8 @@ class _BoxG:
 
 class _ParkedMoveG:
     """Move list bounced to the idle controller (comm 3), cursor parked on the 0-PP slot 0."""
+    callback2 = _battle_main
+
     def __init__(self):
         self.cursor = 0
 
@@ -104,6 +114,8 @@ class _ToggleG:
     A-mash branch, which re-polled choosing but never re-read comm, so it tapped A straight into the
     box every other frame (the A-at-comm6 loop the watcher caught). comm here advances one frame per
     press, so a loop that re-reads it each pass sees the 6 and presses B."""
+    callback2 = _battle_main
+
     def __init__(self):
         self.n = 0
         self.cursor = 0
@@ -162,6 +174,8 @@ class _OpenBoxG:
     """A 0-PP lead pops the selection-script box (comm 6) while the Fight list is opening, under the
     idle controller; the box clears to the open move list (comm 3) once B dismisses it. This is the
     move-list open gate's path, the sibling loop _advance_intro's fix first missed."""
+    callback2 = _battle_main
+
     def __init__(self):
         self.n = 0
 
@@ -197,3 +211,94 @@ def test_comm_wait_leaves_opening_box_with_b_never_mashes_the_open_key():
     assert verdict in ("ready", "move_list"), "the open Fight list is reached, not a timeout"
     assert (eb.KEY_A, 6) not in p.presses, "the open key at comm 6 re-opens the no-PP box"
     assert (eb.KEY_B, 6) in p.presses, "the box is left with B, not the open key"
+
+
+class _FuncBoxG:
+    """The no-PP box up (comm 6) under its own selection-script controller func, the live Seaking
+    stall the IDLE-func cases above never reproduced. The box does not run under the idle or the
+    action/move choose func, so a dispatch gated on those two alone early-returns and the choose-phase
+    waiter mashes its open key back into the box."""
+    def __init__(self, func, cb2=S.CB2_BATTLE_MAIN):
+        self.func = func
+        self.cb2 = cb2
+
+    def callback2(self):
+        return self.cb2
+
+    def controller_func(self, battler):
+        return self.func
+
+    def comm(self, battler=0):
+        return 6
+
+    def in_battle(self):
+        return True
+
+
+def _func_player():
+    p = play.Player.__new__(play.Player)
+    p.keys = []
+    p.tap = lambda keys, hold=8, gap=12: p.keys.append(keys)
+    p.run = lambda frames, keys=0: None
+    return p
+
+
+def test_comm_action_leaves_box_under_selection_script_func():
+    for func in S.SELECTION_SCRIPT_FUNCS:
+        p = _func_player()
+        p.g = _FuncBoxG(func)
+        assert p._comm_action(0) == "box", f"the no-PP box is dispatched under func {func:#x}"
+        assert p.keys == [eb.KEY_B], f"B leaves the box under {func:#x}, nothing else"
+
+
+def test_comm_action_leaves_box_under_unknown_func():
+    # the Four Island gym wedge: the ROM ran the Fight list under 0x84f6d4c, a func in no set, so
+    # the func-gated dispatch returned "" and the intro A went back into the no-PP box
+    p = _func_player()
+    p.g = _FuncBoxG(UNKNOWN_FUNC)
+    assert p._comm_action(0) == "box", "the box is dispatched on comm alone under CB2_BATTLE_MAIN"
+    assert p.keys == [eb.KEY_B], "B leaves the box under a func no set names"
+
+
+def test_comm_action_suppresses_stale_comm_off_battle_main():
+    # control: the bag callback leaves gBattleCommunication holding a stale 6 a blind read would
+    # act on, so off CB2_BATTLE_MAIN the dispatch stays silent
+    p = _func_player()
+    p.g = _FuncBoxG(UNKNOWN_FUNC, cb2=S.CB2_BAG_MAIN)
+    assert p._comm_action(0) == "", "a stale comm under the bag callback is not dispatched"
+    assert p.keys == [], "no key goes out off the battle callback"
+
+
+class _SpentSlotG:
+    """Fight list open under an unknown controller func w/ the cursor parked on a 0-PP slot, the
+    state every A in the gym wedge was pressed into."""
+    callback2 = _battle_main
+
+    def chooser(self):
+        return 0
+
+    def controller_func(self, battler):
+        return UNKNOWN_FUNC
+
+    def in_battle(self):
+        return True
+
+    def in_move_list(self, battler):
+        return True
+
+    def move_cursor(self, battler=0):
+        return 2
+
+    def battlers(self):
+        return [types.SimpleNamespace(pp=[15, 10, 0, 20])]
+
+
+def test_tap_never_sends_a_onto_a_spent_slot():
+    p = play.Player.__new__(play.Player)
+    p.g = _SpentSlotG()
+    p.e = types.SimpleNamespace(read=lambda addr, n: b"\x03")
+    p.runs = []
+    p.run = lambda frames, keys=0: p.runs.append(keys)
+    p.tap(eb.KEY_A)
+    assert eb.KEY_A not in p.runs, "an A on a 0-PP slot is the wedge and never reaches the ROM"
+    assert eb.KEY_B in p.runs, "B leaves the list in its place"

@@ -20,6 +20,16 @@ _pydir = os.path.dirname(os.path.dirname(sorted(glob.glob(BUILD + "/python/lib.*
 if _pydir not in sys.path:
     sys.path.insert(0, _pydir)
 
+# the vendored 0.10 binding imports the external `cached_property` package, which is absent under
+# py3.14; functools.cached_property (stdlib since 3.8) is the same descriptor, aliased under that name
+import functools as _functools
+import types as _types
+
+if "cached_property" not in sys.modules:
+    _cp = _types.ModuleType("cached_property")
+    _cp.cached_property = _functools.cached_property
+    sys.modules["cached_property"] = _cp
+
 import mgba.core  # noqa: E402
 import mgba.image  # noqa: E402
 import mgba.log  # noqa: E402

@@ -12,6 +12,15 @@ TYPE_MYSTERY = 9
 # Shadow Force), 151 Solar Beam, 75 charge (Razor Wind/Sky Attack/Freeze Shock/Ice Burn), 145
 # Skull Bash.
 CHARGING_EFFECTS = frozenset({75, 145, 151, 155})
+# effect ids (constants/battle_move_effects.h) whose listed power the formula cannot take at face
+# value. Two turns per hit, so half: the charging set above plus 80 recharge (Giga Impact). Never
+# worth a pick on their power: 148 Future Sight lands two turns on and fails while one is pending,
+# 158 Fake Out first turn only, 170 Focus Punch drops when hit, 7 self-KO, 8 Dream Eater and 92 Snore
+# need a sleeper, 325 Belch an eaten berry, 305 Synchronoise a shared type, and 26/89/144/257 hit
+# back off damage taken. 286 Last Resort fails until every other move has been used this battle.
+TWO_TURN_EFFECTS = CHARGING_EFFECTS | {80}
+NO_PICK_EFFECTS = frozenset({7, 8, 26, 89, 92, 144, 148, 158, 170, 257, 305, 325})
+LAST_RESORT_EFFECT = 286
 
 # abilities that take a move of the type for no damage, from the ABILITYEFFECT_ABSORBING branch of
 # battle_util.c plus Levitate; ids resolve by name because the ROM's table outruns the vendored source
@@ -40,10 +49,15 @@ class Scored:
     score: float
 
 
-def expected_damage(user: BattleMon, foe: BattleMon, mv: R.Move) -> tuple:
-    """Gen-3 base damage formula times STAB, type chart and accuracy."""
-    if mv.split == R.SPLIT_STATUS or mv.power == 0:
+def expected_damage(user: BattleMon, foe: BattleMon, mv: R.Move, used=frozenset()) -> tuple:
+    """Gen-3 base damage formula times STAB, type chart and accuracy, per turn the move costs.
+    `used` is the slots user has picked this battle, the Last Resort precondition."""
+    if mv.split == R.SPLIT_STATUS or mv.power == 0 or mv.effect in NO_PICK_EFFECTS:
         return 0.0, 1.0
+    if mv.effect == LAST_RESORT_EFFECT:
+        others = {i for i, m in enumerate(user.moves) if m and m != mv.id}
+        if not others <= set(used):
+            return 0.0, 1.0
     if mv.split == R.SPLIT_SPECIAL:
         atk, dfn = user.sp_atk, foe.sp_def
     else:
@@ -52,16 +66,17 @@ def expected_damage(user: BattleMon, foe: BattleMon, mv: R.Move) -> tuple:
     stab = 1.5 if mv.type in user.types else 1.0
     base = ((2 * user.level / 5 + 2) * mv.power * atk / max(dfn, 1)) / 50 + 2
     acc = mv.accuracy / 100 if mv.accuracy else 1.0
-    return base * stab * eff * acc, eff
+    turns = 2 if mv.effect in TWO_TURN_EFFECTS else 1
+    return base * stab * eff * acc / turns, eff
 
 
-def rank_moves(user: BattleMon, foe: BattleMon) -> list:
+def rank_moves(user: BattleMon, foe: BattleMon, used=frozenset()) -> list:
     out = []
     for slot, (move_id, pp) in enumerate(zip(user.moves, user.pp)):
         if not move_id or not pp:
             continue
         mv = R.move(move_id)
-        dmg, eff = expected_damage(user, foe, mv)
+        dmg, eff = expected_damage(user, foe, mv, used)
         # a status move scores under any hit that does damage, above a 0x hit
         score = dmg if dmg > 0 else (0.5 if mv.split == R.SPLIT_STATUS else 0.0)
         out.append(Scored(slot, mv, dmg, eff, score))
@@ -88,10 +103,11 @@ def move_value(types, move_id: int) -> float:
     if not 0 < move_id < R.MOVE_COUNT:
         return 0.0
     mv = R.move(move_id)
-    if mv.split == R.SPLIT_STATUS or mv.power < 10:
+    if mv.split == R.SPLIT_STATUS or mv.power < 10 or mv.effect in NO_PICK_EFFECTS or mv.effect == LAST_RESORT_EFFECT:
         return 0.0
     acc = mv.accuracy / 100 if mv.accuracy else 1.0
-    return mv.power * acc * (1.5 if mv.type in types else 1.0)
+    turns = 2 if mv.effect in TWO_TURN_EFFECTS else 1
+    return mv.power * acc * (1.5 if mv.type in types else 1.0) / turns
 
 
 def replacement_slot(mon, new_move: int) -> int | None:
@@ -150,13 +166,16 @@ def outmatched(user: BattleMon, foes: list, frac: float = 0.5) -> bool:
     return False
 
 
-def best_switch(party: list, active: BattleMon, foes: list, margin: float = 0.0) -> int | None:
+def best_switch(party: list, active: BattleMon, foes: list, margin: float = 0.0, ko_edge: bool = True) -> int | None:
     """Party slot to send out against foes, or None to keep active on the field.
 
     A fainted active takes the bench mon with the best dealt-minus-taken edge. A standing
-    active only steps out when it is losing the exchange (edge below 0), cannot finish
-    the foe this turn, and a bench mon beats its edge by `margin`, since the switch hands
-    the foe a free hit."""
+    active steps out when it cannot finish the foe this turn and either it is losing the
+    exchange (edge below 0) w/ a bench mon beating its edge by `margin`, or a bench mon lands a
+    one-hit KO where the active needs three hits or more (the type edge, Electric into Water);
+    the free hit the switch hands the foe is worth that. `ko_edge` False turns that second
+    route off, for a mon the type edge itself brought in, so two edges never chain into a
+    switch every turn."""
     pick = strongest_bench(party, active, foes)
     if pick is None:
         return None
@@ -164,15 +183,20 @@ def best_switch(party: list, active: BattleMon, foes: list, margin: float = 0.0)
     if active.hp == 0:
         return best
     dealt, taken = edge(active, foes)
-    if dealt >= 1.0 or dealt - taken >= 0 or score < dealt - taken + margin:
+    if dealt >= 1.0:
+        return None
+    if ko_edge and dealt < 0.5 and edge(as_battler(next(m for m in party if m.slot == best)), foes)[0] >= 1.0:
+        return best
+    if dealt - taken >= 0 or score < dealt - taken + margin:
         return None
     return best
 
 
 def weakening_move(user: BattleMon, foe: BattleMon) -> Scored | None:
-    """Lowest-damage hit expected to leave the foe standing, for chipping before a throw."""
+    """Hardest hit expected to leave the foe standing, for chipping before a throw; the lowest safe
+    hit stretched a catch over turns of free hits for the foe."""
     # power under 10 is a charge-up or counter move (Bide) whose listed power is a placeholder;
     # a CHARGING_EFFECTS move deals no damage on the turn it is picked and wedges the action read
     safe = [s for s in rank_moves(user, foe)
             if s.move.power >= 10 and s.move.effect not in CHARGING_EFFECTS and 0 < s.damage < foe.hp * 0.8]
-    return min(safe, key=lambda s: s.damage) if safe else None
+    return max(safe, key=lambda s: s.damage) if safe else None

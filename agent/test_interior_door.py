@@ -48,6 +48,7 @@ def test_overworld_border_still_gates(tmp_path):
 
 def test_no_route_exit_keeps_the_last_snapshot():
     class _Graph:
+        gate_reason = {}
         cur_badges = 0
 
         def route(self, *a, **k):
@@ -55,6 +56,9 @@ def test_no_route_exit_keeps_the_last_snapshot():
 
         def explore_hop(self, *a, **k):
             return None
+
+        def passable(self, *a, **k):
+            return set()
 
     class _G:
         def position(self):
@@ -67,11 +71,15 @@ def test_no_route_exit_keeps_the_last_snapshot():
     p.graph = _Graph()
     p.g = _G()
     p._gyms = set()
+    p._last_hop = None
     p.goal = {"mode": "grind", "map": [0, 27]}
     p.keep_state = False
     p.field_moves = lambda: frozenset()
+    p._climb = lambda: False
     p.region = lambda: (4, 5, 2, 2)
     p._blocked_from = lambda region: set()
+    p._bounced = {}
+    p._leave_dynamic_interior = lambda here, moves: False  # this map is not a dynamic interior
     with pytest.raises(play.GoalExit):
         p.travel_toward((0, 27))
     assert p.keep_state is True, "a no-route exit must keep the last good snapshot"
@@ -81,7 +89,7 @@ def _bounce_player(graph, returned=True):
     p = play.Player.__new__(play.Player)
     p.graph = graph
     p.g = type("_G", (), {"badges": lambda self: 8})()
-    p._blocked = {}
+    p._blocked, p._bounced = {}, {}
     p._stuck = {}
     p._bounces = {}
     p._returned = returned

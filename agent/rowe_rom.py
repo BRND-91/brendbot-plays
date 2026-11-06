@@ -82,6 +82,7 @@ MAPHDR_MUSIC = 0x10
 MAPHDR_LAYOUT_ID = 0x12
 MAPHDR_REGION_SECTION = 0x14  # regionMapSectionId, the mapsec a map belongs to
 MAPHDR_MAP_TYPE = 0x17
+MAP_TYPE_UNDERGROUND = 4
 MAP_TYPE_UNDERWATER = 5
 MAP_TYPE_INDOOR = 8
 MAP_SCRIPT_SCAN_CAP = 64  # map-script table entries, terminated by a 0 type byte; cap guards a garbage header pointer
@@ -570,6 +571,13 @@ def is_underwater(group: int, num: int) -> bool:
     return h is not None and _rom()[h + MAPHDR_MAP_TYPE] == MAP_TYPE_UNDERWATER
 
 
+def is_underground(group: int, num: int) -> bool:
+    """A MAP_TYPE_UNDERGROUND map: a cave or dungeon floor (Victory Road), outdoors to the indoor
+    test yet a leg the walk finishes rather than leaves for an errand."""
+    h = map_header(group, num)
+    return h is not None and _rom()[h + MAPHDR_MAP_TYPE] == MAP_TYPE_UNDERGROUND
+
+
 def is_indoor(group: int, num: int) -> bool:
     """A MAP_TYPE_INDOOR map: a gym floor or building interior, the inside of a place rather than
     the town it exits to."""
@@ -838,8 +846,10 @@ def gym_maps() -> frozenset:
                      if map_music(g, n) == GYM_MUSIC)
 
 
-def map_connections(group: int, num: int) -> list:
-    """(direction, (group, num)) for each map bordering (group, num) in the overworld."""
+def map_connection_links(group: int, num: int) -> list:
+    """(direction, offset, (group, num)) for each map bordering (group, num) in the overworld. The
+    offset shifts a border tile onto the neighbour: x on a north or south edge lands at x - offset,
+    y on a west or east edge at y - offset."""
     h = map_header(group, num)
     if h is None:
         return []
@@ -852,9 +862,14 @@ def map_connections(group: int, num: int) -> list:
         return []
     out = []
     for i in range(n):
-        d, _off, g, nm = struct.unpack_from("<IiBB", _rom(), _fo(p) + i * 12)
-        out.append((d, (g, nm)))
+        d, off, g, nm = struct.unpack_from("<IiBB", _rom(), _fo(p) + i * 12)
+        out.append((d, off, (g, nm)))
     return out
+
+
+def map_connections(group: int, num: int) -> list:
+    """(direction, (group, num)) for each map bordering (group, num) in the overworld."""
+    return [(d, dest) for d, _off, dest in map_connection_links(group, num)]
 
 
 def map_warps(group: int, num: int) -> list:
@@ -874,6 +889,27 @@ def map_warps(group: int, num: int) -> list:
         o = _fo(pwarp) + i * WARP_STRIDE
         x, y = struct.unpack_from("<hh", _rom(), o)
         out.append((x, y, (_rom()[o + WARP_MAP_GROUP], _rom()[o + WARP_MAP_NUM])))
+    return out
+
+
+def map_warp_links(group: int, num: int) -> list:
+    """(x, y, (dest_group, dest_num), dest_warp) per warp tile: `dest_warp` indexes the destination
+    map's own warp table, the tile the player lands on."""
+    h = map_header(group, num)
+    if h is None:
+        return []
+    ev = struct.unpack_from("<I", _rom(), h + MAPHDR_EVENTS)[0]
+    if not _in_rom(ev):
+        return []
+    nwarp = _rom()[_fo(ev) + MAPEVENTS_WARP_COUNT]
+    pwarp = struct.unpack_from("<I", _rom(), _fo(ev) + MAPEVENTS_WARP_PTR)[0]
+    if not _in_rom(pwarp) or not _in_rom(pwarp + nwarp * WARP_STRIDE):
+        return []
+    out = []
+    for i in range(nwarp):
+        o = _fo(pwarp) + i * WARP_STRIDE
+        x, y, _elevation, dest_warp = struct.unpack_from("<hhBB", _rom(), o)
+        out.append((x, y, (_rom()[o + WARP_MAP_GROUP], _rom()[o + WARP_MAP_NUM]), dest_warp))
     return out
 
 

@@ -38,7 +38,7 @@ def _player() -> Player:
     p.g = _G()
     p.graph = _Graph()
     p.goal = {"mode": "grind"}  # the cycle guard counts only goal-directed modes, so it stays off here
-    p._blocked, p._stuck, p._bounces = {}, {}, {}
+    p._blocked, p._bounced, p._stuck, p._bounces = {}, {}, {}, {}
     p._last_hop, p._returned = None, False
     p.field_moves = lambda: frozenset()
     p._landing_exits = lambda: {(0, 35), (24, 108)}  # the slab's door back out plus a deeper warp

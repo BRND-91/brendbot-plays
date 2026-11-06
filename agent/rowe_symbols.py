@@ -239,6 +239,10 @@ BAG_POCKETS = 0x0203AD70
 TM_POCKET = 0x0203ADC4      # gBagPockets[8].itemSlots, quantity ^ (encryptionKey & 0xFFFF) like the rest
 TM_POCKET_SLOTS = 208
 BAG_POCKET_TMS = 8
+BAG_POCKET_COUNT = 10  # RIGHT from tab 2 on the field bag cycles 3..9 then 0, 1, 2 (center_entry.ss probe)
+# gBagPosition.scrollPosition[pocket], the u16 array after cursorPosition[BAG_POCKET_COUNT]; the list
+# shows five rows, so the cursor stops at 4 and DOWN past it moves this instead (vr_16_13.ss probe)
+BAGPOS_SCROLL = BAGPOS_CURSOR + 2 * BAG_POCKET_COUNT
 # gMain.callback2 on the move-select summary a level-up or TM "Which move should be forgotten?" opens
 CB2_MOVE_SELECT = 0x821EDBD
 # gMain.callback2 values of the party menu (opening fade and steady), read off a gym trainer fight
@@ -265,11 +269,18 @@ RELEARNER_PTR = 0x0203CFA4     # sMoveRelearnerStruct, the heap struct behind th
 RELEARNER_MENU_ITEMS = 0x1A4   # struct offset of its ListMenuItem rows, {const u8 *name; s32 id} w/ id the move id, Cancel last
 LIST_CANCEL = -2
 RELEARNER_MAX_ROWS = 64
+# live ListMenuTemplate globals, const struct ListMenuItem *items at +0x00, u16 totalItems at +0x0C.
+# ScriptMenu_Multichoice (the dimension NPC, the island ticket clerk) fills the first; the Seagallop
+# sailor's ScriptMenu_ScrollingMultichoice fills the second, 0x28 past it, and leaves the first holding
+# stale task bytes, so a reader that knows only MENU_LIST_TEMPLATE reads the sailor's list back empty.
+MENU_LIST_TEMPLATE = 0x03004C98
+SCROLL_MENU_TEMPLATE = 0x03004CC0
 SB2_BATTLE_POINTS = 0xA3C      # u16, the BP box on the nurse's price prompt; 8 -> 4 across one egg move
 # gBattlerControllerFuncs[0], the player's controller step; it holds HandleInputChooseAction only while
 # the action grid waits on the player, and other ROM addresses through the turn's animations (found by
 # diffing EWRAM across the menu, a switch animation and the menu again)
 CB2_BATTLE_MAIN = 0x0803C761   # gMain.callback2 through a battle's action grid, move list and turn playback
+CB2_OVERWORLD = 0x080BFD2D     # gMain.callback2 on the field; the Hall of Fame screen, the credits and the title screen are none of it
 BATTLER0_CONTROLLER_FUNC = 0x020207D8
 CONTROLLER_FUNC_STRIDE = 4     # gBattlerControllerFuncs holds one 4-byte fn pointer per battler, so battler N sits STRIDE*N past [0]
 # 0x83C12BC while "What will X do?" takes input (DOWN moves gActionSelectionCursor, A opens the
@@ -282,14 +293,27 @@ PLAYER_CHOOSE_ACTION = 0x083C12BC
 # blind-A-mashed the parked move. found by diffing BATTLER0_CONTROLLER_FUNC in that battle against
 # the roxanne and battle_disabled fixtures, which hold 0x83C12BC
 PLAYER_CHOOSE_ACTION_ALT = 0x084F5D40
-PLAYER_CHOOSE_ACTION_FUNCS = frozenset({PLAYER_CHOOSE_ACTION, PLAYER_CHOOSE_ACTION_ALT})
+# a third choose func, held through the Four Island gym fight (Seaking vs Houndstone, dump
+# rowe_stall_1793924806): on that dump B leaves the no-PP box (comm 6 -> 3), UP moves the move
+# cursor 2 -> 0 and B backs out to the grid (comm 2), the same drive as the two above. The ROM keeps
+# adding handlers in this 0x84F4000-0x84F7000 range, so the no-PP dispatch no longer keys on this set
+# (play._comm_action reads comm under CB2_BATTLE_MAIN); choosing() still does.
+PLAYER_CHOOSE_ACTION_ALT2 = 0x084F6D4C
+PLAYER_CHOOSE_ACTION_FUNCS = frozenset({PLAYER_CHOOSE_ACTION, PLAYER_CHOOSE_ACTION_ALT, PLAYER_CHOOSE_ACTION_ALT2})
 # gBattleCommunication[0] sub-state while PLAYER_CHOOSE_ACTION drives input. The same func runs the
 # action grid and the Fight move list, so this is the only read that tells them apart: 0 or 2 on the
 # grid, 3 while the move list takes input (diffed across roxanne, battle_disabled, stall_route126)
 MOVE_LIST_COMM_STATE = 3
 # gBattleCommunication sub-state while the selection script runs (the no-PP / ineffective-move box).
-# The controller bounces to idle 0x83aa958 here, so choosing() reads False and only B leaves it.
+# choosing() reads False here and only B leaves the box.
 SELECTION_SCRIPT_COMM_STATE = 6
+# gBattlerControllerFuncs[0] values the no-PP selection-script box runs under, distinct from the
+# action/move choose funcs: the box holds its own controller step (comm 6) that neither choosing()
+# nor the action set should match, so the no-PP dispatch keys off this set to tap B out of the box
+# rather than letting the choose-phase waiter mash its open key back into it. 0x84f4c78 is the
+# battle_wedge fixture, 0x84f5b50 the live Seaking stall; found by reading the frozen controller func
+# off each dump against the battle_disabled fixture, which refuses a 0-PP slot under 0x83c12bc
+SELECTION_SCRIPT_FUNCS = frozenset({0x084F4C78, 0x084F5B50})
 FIELD_LOCKED = 0x03004C94      # 1 while an NPC script holds the player (its text box up), 0 on the free field;
                                # gMain.callback2 reads overworld either way, so this tells the two apart
 # shop.c sMartInfo: the open Mart's item list, a ROM pointer to a 0-terminated u16 id array, and
@@ -308,6 +332,9 @@ FLAG_RECEIVED_BADGE01 = 0xE25  # +n for the nth badge reward handed over, set be
 FLAG_BADGE01 = 0xCD7  # system flags start at 0xCD0 here (vanilla 0x860), badge 1 is +7 in both
 BADGE_COUNT = 8
 FLAG_SYS_GAME_CLEAR = 0xCD4  # SYSTEM_FLAGS+0x4, set natively by the Hall of Fame; the game-cleared bit
+FLAG_DEFEATED_ELITE_4 = (0x4FB, 0x4FC, 0x4FD, 0x4FE)  # Sidney, Phoebe, Glacia, Drake, each set by its room script on the win
+FLAG_DEFEATED_METEOR_FALLS_STEVEN = 0x4F8  # Steven in his Meteor Falls cave (24,107), whose door opens on the game-clear bit
+FLAG_DEFEATED_RED = 0xDCC  # Red in Shoal Cave's high-tide inner room (24,51); DAILY_FLAGS_START 0xD90 + 0x3C
 JOHTO_BADGE01 = 0x2A4  # badges 9-16 from the 8 Sevii-island leaders, Falkner (0x2A4) through Clair (0x2AB); trainer fights, not gym buildings
 JOHTO_BADGE_COUNT = 8
 MAP_DYNAMIC = (127, 127)  # a dynamic-warp header (group, num): the real destination resolves at runtime

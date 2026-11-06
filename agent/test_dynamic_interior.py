@@ -85,6 +85,7 @@ def main() -> None:
         rowe_map.warps = lambda e: DYNAMIC
         pt = _player("map_changed")
         pt._gyms = set()
+        pt._last_hop = None
         pt.graph = _Graph()
         pt.goal = {"mode": "travel", "to": [0, 79]}
         pt.region = lambda: (1, 5, (13, 22))

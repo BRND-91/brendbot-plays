@@ -63,19 +63,54 @@ VICTORY_ROAD = [(24, 43), (24, 44), (24, 45)]
 # -> Hall4 -> Wallace -> Hall of Fame, each dropping out as reached. group 16 is IndoorEverGrande.
 ENDGAME_CHAIN = VICTORY_ROAD + [(16, 10), (16, 9), (16, 0), (16, 5), (16, 1), (16, 6),
                                 (16, 2), (16, 7), (16, 3), (16, 8), (16, 4), (16, 11)]
+# Post-game bosses in fight order once the Champion is in, each a L100 team of six: Steven in his
+# Meteor Falls cave (24,107), whose door in 1F_1R (24,0) opens on the game-clear bit, then Red in Shoal
+# Cave's high-tide inner room (24,51). status["boss_flags"] carries each defeat flag in this order.
+POSTGAME = [(24, 107), (24, 51)]
 # Three Island dock, the Seagallop ferry row that stays open once the 8 Hoenn badges are in; the
 # Johto-bound rows report locked and gate out, so this is where the 8-badge leg heads.
 SEVII_ENTRY = (0, 79)
+# The Sevii run in badge order: (badge index, gym entrance map, the island landing map whose
+# dispatcher row and mainland-dock row sail there). Each gym checkflags its own badge and the leaders
+# fall in this order; the ticket for an island is handed by any field dispatcher on picking that
+# island's row (script_decode.ISLAND_TICKETS), so a leg is: route to the gym over the ferry layer,
+# which crosses on a dispatcher when the mainland dock row is still ticketless, fight, re-plan.
+# Whitney's gym opens off the Three Island town (0,77), one land hop past the (0,79) landing;
+# Pryce's off (1,72), one land hop past Seven Island (1,66).
+SEVII_LEGS = [
+    (8, (2, 7), (0, 75)), (9, (2, 8), (0, 76)), (10, (2, 9), (0, 79)), (11, (2, 10), (0, 123)),
+    (12, (2, 11), (1, 32)), (13, (2, 12), (1, 58)), (14, (2, 13), (1, 66)), (15, (2, 15), (2, 14)),
+]
 
 
-def build_graph(path: str, flags=frozenset()) -> map_graph.MapGraph:
+def script_layer(tickets=frozenset(), hidden=frozenset()) -> dict:
+    """The script-warp layer (the Seagallop ferry) under the held key-item set `tickets`: a
+    Hoenn-mainland dock's island arm whose Sevii ticket is not among them is dropped so routing
+    crosses on One Island and the free field dispatchers rather than looping on a dock row that
+    refuses without the ticket. A giver map in `hidden` has had its sailor removed by a set
+    visibility flag at this story phase, so all its arms drop and routing aims at a present
+    dispatcher instead of a gap. The executor rebuilds this layer when the bag's key items or the
+    hidden set change."""
+    tickets = frozenset(tickets)
+    # a dock's own row (the Slateport harbor decodes a (9,9)->(9,9) arm) is no hop: routed as one it
+    # re-talks the sailor in place and the walk cycles on the dock
+    script = {src: {d: g for d, g in dests.items()
+                    if d != src and script_decode.passable_island_arm(src, d, tickets)}
+              for src, dests in script_decode.script_edges().items()
+              if src not in hidden}
+    return {s: d for s, d in script.items() if d}
+
+
+def build_graph(path: str, flags=frozenset(), tickets=frozenset(), hidden=frozenset()) -> map_graph.MapGraph:
     """The map graph both the CLI planner and the in-process executor route over, assembled one way
     so the two never disagree on the neighbor set. Carries the ROM world edges, the pass-through
     maps, the script-warp layer (the Seagallop ferry), and the gate flags set right now, so a dock's
     ferry arm is a neighbor whenever its flag is up. The executor passes flags read live off the
-    emulator; the CLI planner passes the set the executor recorded into status.json."""
+    emulator and the giver maps whose sailor is gone; the CLI planner passes the sets the executor
+    recorded into status.json."""
     return map_graph.MapGraph(path, world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs(),
-                              script=script_decode.script_edges(), flags=flags)
+                              script=script_layer(tickets, hidden), flags=flags,
+                              ferry_hubs=script_decode.SEAGALLOP_DOCKS)
 
 
 def executor_running() -> bool:
@@ -140,18 +175,22 @@ def closed_gyms() -> set:
 
 
 def still_closed(status: dict, graph: "map_graph.MapGraph") -> set:
-    """Closed gyms the run has not changed enough to retry, so the ladder routes past them. A gym
-    shut by a lost fight reopens once the party out-levels its close baseline or a new field move
-    is in the bag. A gym shut because the walk could not reach its leader reopens once the map
-    graph has grown a route since. A record with no signature (written before this format) reopens
-    on sight, so a stale permanent close does not strand the run exploring forever."""
+    """Gyms the ladder routes past. Johto gyms read the ROM badge-gate scan: each one checkflags the
+    badge it awards and the Sevii leg is strictly sequential, so a Johto gym whose gate badge exceeds
+    the badges earned is shut until the ladder reaches it (Falkner (2,7) badge 8 opens at 8, Whitney
+    (2,9) badge 10 stays shut until 10). Hoenn gyms are not badge-order-gated (the party reaches
+    Petalburg (8,1), badge 4, at one badge), so their own-badge checkflag is post-win dialogue, not an
+    entry gate; they keep the whiteout record, reopening once the party out-levels the close baseline,
+    a new field move is in the bag, or the map graph has grown a route since."""
+    badges = sum(league_flags(status))
+    shut = {(g, num) for g, num, b in rowe_rom.badge_gate_maps()
+            if (g, num) in JOHTO_GYM and b > badges}
     party = status.get("party", [])
     now_level = min((m["level"] for m in party), default=0)
     now_moves = set(status.get("field_moves", []))
     now_maps = len(graph.visited)
-    shut = set()
     for e in _closed_raw():
-        if not isinstance(e, dict) or "reason" not in e:
+        if not isinstance(e, dict) or "reason" not in e or tuple(e["gym"]) in JOHTO_GYM:
             continue
         moves_grew = now_moves > set(e.get("field_moves", []))
         if e["reason"] == "loss":
@@ -216,6 +255,19 @@ def nearest_gym(unbeaten: list, hops: dict, shut: set) -> tuple | None:
     return min(open_reachable, key=lambda g: hops[g])
 
 
+def leader_stand(gym: tuple) -> tuple | None:
+    """Tile below the gym's leader: the object on the gym map whose script battles the trainer the
+    badge table names for that gym, None when no object on the map does (a Hoenn leader in an inner
+    room). Player.gym_stand's northmost-static-object entry read picked Al at (0,7) on Bugsy's gym
+    (2,8), where Bugsy stands at (6,13) and the one object north of him wanders, so the run fought
+    Al, then read his beaten dialog as the gym shut."""
+    leader = {b: ld for b, _flag, _region, ld in rowe_rom.badge_flags()}[ALL_GYMS[gym]]
+    for _idx, x, y, _move, script in rowe_rom.map_object_scripts(*gym):
+        if any(rowe_rom.trainer_name(t) == leader for t in rowe_rom._script_trainer_ids(script)):
+            return (x, y + 1)
+    return None
+
+
 def planning_anchor(status: dict, here: tuple, gym: tuple | None) -> tuple:
     """Map the next goal anchors on. The nearest reachable unbeaten gym when there is one, else
     the active goal's own target map, so a heal or restock that ends in a service town does not
@@ -228,16 +280,38 @@ def planning_anchor(status: dict, here: tuple, gym: tuple | None) -> tuple:
     return tuple(target) if target else here
 
 
-def sevii_goal(graph: map_graph.MapGraph, moves: frozenset) -> tuple:
-    """(goal, reason) for the 8-badge Sevii leg. Every Johto gym sits behind the Seagallop ferry and
-    Hoenn grass tops out under the cap, so travel to Three Island while it is unwalked, then explore
-    the nearest unvisited map reachable from it. Never grind."""
-    if SEVII_ENTRY not in graph.visited:
-        return {"mode": "travel", "to": list(SEVII_ENTRY)}, f"travel to Three Island {list(SEVII_ENTRY)}"
-    reach = hops_from(SEVII_ENTRY, graph, moves)
-    target = min((m for m in reach if m not in graph.visited),
-                 key=lambda m: (reach[m], m), default=SEVII_ENTRY)
-    return {"mode": "explore", "to": list(target), "cap": None}, f"on Three Island, exploring Sevii toward {list(target)}"
+def sevii_goal(graph: map_graph.MapGraph, moves: frozenset, status: dict) -> tuple:
+    """(goal, reason) for the Sevii leg once the 8 Hoenn badges are in. Target the lowest-indexed
+    unbeaten Sevii gym from the badge table (Falkner, badge 8, first). Fetch the next unheld island
+    ticket whose clerk is reachable before routing to the gym, because the gym's island cannot be
+    entered without that ticket. While no route is open, explore toward the nearest unvisited map so
+    the graph keeps growing; with no route and nothing unvisited left, explore toward the gym and name
+    the shut edges. Never travel to the map the party stands on, never grind."""
+    here = tuple(status["map"])
+    unbeaten = [g for g in unbeaten_gyms(status) if g in JOHTO_GYM]
+    gym = min(unbeaten, key=JOHTO_GYM.get)
+    leader = {b: ld for b, _flag, _region, ld in rowe_rom.badge_flags()}[JOHTO_GYM[gym]]
+    flags = sum(league_flags(status))
+    island = next(isl for _b, g, isl in SEVII_LEGS if g == gym)
+    ticket = script_decode.ISLAND_TICKETS[island]
+    held = ticket in set(status.get("tickets", []))
+    # the ferry layer carries the leg: a mainland dock row needs the island's ticket, a field
+    # dispatcher hands that ticket on the row pick and sails, so the gym is routable whenever any
+    # dispatcher or a ticketed dock is; route straight to it, else explore to grow the graph.
+    if graph.route(here, gym, field_moves=moves) is not None:
+        goal = {"mode": "gym", "map": list(gym), "badges": status.get("badges", 0), "flags": flags}
+        stand = leader_stand(gym)
+        if stand is not None:
+            goal["stand"] = list(stand)
+        return goal, (f"next leader {leader}, gym {list(gym)} on island {list(island)}, ticket "
+                      f"{ticket:#x} {'held' if held else 'from the dispatcher row'}, heading there")
+    reach = hops_from(here, graph, moves)
+    unvisited = [m for m in reach if m not in graph.visited and m != here]
+    if unvisited:
+        target = min(unvisited, key=lambda m: (reach[m], m))
+        return {"mode": "explore", "to": list(target), "cap": None}, f"no ferry route to {leader} {list(gym)} yet, exploring toward {list(target)}"
+    shut = sorted(f"{list(a)}->{list(b)}" for a, b in graph.gated if graph._gate_shut(a, b, moves))
+    return {"mode": "explore", "to": list(gym), "cap": None}, f"no route or unvisited frontier toward {leader} {list(gym)}, shut gates {shut}"
 
 
 def recommend(status: dict, graph: map_graph.MapGraph) -> tuple:
@@ -254,17 +328,28 @@ def recommend(status: dict, graph: map_graph.MapGraph) -> tuple:
     unbeaten = unbeaten_gyms(status)
     gym = nearest_gym(unbeaten, hops, still_closed(status, graph))
     anchor = planning_anchor(status, here, gym)
-    if badges >= len(GYM_BADGE) and unbeaten and gym is None:
-        # 8 Hoenn badges, no gym the walk can route to: the Johto gyms are ferry-locked and Hoenn
-        # grass raises nothing at cap, so take the Three Island ferry and explore Sevii, never grind
-        goal, note = sevii_goal(graph, frozenset(status.get("field_moves", [])))
-        return goal, f"at cap {cap}, {badges} badges, no gym reachable, {note}"
+    sevii_unbeaten = [g for g in unbeaten if g in JOHTO_GYM]
+    if badges >= len(GYM_BADGE) and sevii_unbeaten:
+        # the 8 Hoenn badges are in and every remaining leader sits behind the Seagallop ferry, so the
+        # Sevii leg targets the next leader straight off the badge table, not nearest_gym (which ranks
+        # by hops and demotes a gym the ladder recorded closed, sending the party to the wrong island)
+        goal, note = sevii_goal(graph, frozenset(status.get("field_moves", [])), status)
+        return goal, f"at cap {cap}, {badges} badges, {note}"
     if len(party) < PARTY_SIZE or low < cap:
         grass = grind_map(graph, blocked, anchor, cap)
         return {"mode": "grind", "map": grass, "cap": cap}, f"party {len(party)}/6, lowest attacker L{low} vs cap {cap}, grind {grass} toward {list(anchor)}"
     if not unbeaten:
         if status.get("champion"):
-            return {"mode": "done"}, "champion, every badge in and the League cleared, no goal left"
+            # a status written before boss_flags existed reads as nobody beaten, never as done
+            flags = status.get("boss_flags") or [False] * len(POSTGAME)
+            bosses = [m for m, beaten in zip(POSTGAME, flags) if not beaten]
+            if not bosses:
+                return {"mode": "done"}, "champion, every badge in, the League and the post-game bosses cleared, no goal left"
+            boss = bosses[0]
+            moves = frozenset(status.get("field_moves", []))
+            if here == boss or graph.route(here, boss, field_moves=moves) is not None:
+                return {"mode": "travel", "to": list(boss)}, f"champion, boss travel to {list(boss)}"
+            return {"mode": "explore", "to": list(boss), "cap": None}, f"champion, no route to boss {list(boss)} under moves {sorted(moves)}, exploring toward it"
         moves = frozenset(status.get("field_moves", []))
         # every gym down, all 16 League flags in: advance the endgame chain to the first map not
         # yet reached that there is a walkable route to from here, so arrival at (0,8) travels on into
@@ -280,14 +365,20 @@ def recommend(status: dict, graph: map_graph.MapGraph) -> tuple:
         # at cap the party earns nothing. the reason names here, the moves it routed under, and the
         # reachable-map count so a bad here (an interior map or a mid-warp write) reads in one line
         target = next((m for m in ENDGAME_CHAIN if m not in graph.visited), ENDGAME_CHAIN[-1])
+        if here in ENDGAME_ROOMS:
+            # inside the League w/ the next hall gated: hold the travel goal so the executor
+            # retries the door and the supervisor's spin-break ends the run, instead of exploring
+            # Hoenn from the lobby (Route 121 at 16 badges, every mon at L100)
+            return {"mode": "travel", "to": list(target)}, f"at cap {cap}, {badges} badges, at {ENDGAME_ROOMS[here]} w/ no route on to {list(target)}, holding for the door"
         hop = graph.route(here, target, field_moves=frozenset())
         return {"mode": "explore", "to": list(target), "cap": None}, f"at cap {cap}, {badges} badges, here {list(here)}, no League travel route under moves {sorted(moves)}, {len(hops)} maps reachable, hop {list(hop) if hop else None}, exploring toward {list(target)}"
     if gym is None:
         target = min(unbeaten, key=lambda g: ALL_GYMS[g])
         return {"mode": "explore", "to": list(target), "cap": None}, f"at cap {cap}, no gym reachable over world edges, exploring toward {list(target)}"
     goal = {"mode": "gym", "map": list(gym), "badges": badges, "flags": sum(league_flags(status))}
-    if gym in GYM_STAND:
-        goal["stand"] = list(GYM_STAND[gym])
+    stand = GYM_STAND.get(gym) or leader_stand(gym)
+    if stand is not None:
+        goal["stand"] = list(stand)
     retry = " (retry, closed earlier)" if gym in closed_gyms() else ""
     return goal, f"at cap {cap}, nearest unbeaten gym {list(gym)} at {hops[gym]} hops{retry}"
 
@@ -302,8 +393,13 @@ def main() -> None:
     with open(STATUS) as f:
         status = json.load(f)
     age = int(time.time() - status["ts"])
+    if not status["party"]:
+        print(f"status {age}s old holds no party (written off the field), executor {'running' if executor_running() else 'stopped'}, goal unchanged")
+        return
     lead = status["party"][0]
-    graph = build_graph(GRAPH, flags=frozenset(status.get("gate_flags", [])))
+    graph = build_graph(GRAPH, flags=frozenset(status.get("gate_flags", [])),
+                        tickets=frozenset(status.get("tickets", [])),
+                        hidden=frozenset(tuple(m) for m in status.get("hidden_givers", [])))
     goal, why = recommend(status, graph)
     current = json.load(open(GOAL)) if os.path.exists(GOAL) else None
     running = executor_running()

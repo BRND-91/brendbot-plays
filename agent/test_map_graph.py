@@ -63,6 +63,16 @@ def main() -> None:
     print("ok")
 
 
+def test_self_edge_is_never_the_first_hop(tmp_path):
+    # Four Island's world layer lists (0,123) as its own neighbour; w/ the real exit (1,26) blocked
+    # by a heal-detour bounce, route came back as the map itself and the walk crossed nothing
+    here, exit_map, dock, gym = (0, 123), (1, 26), (1, 27), (2, 11)
+    g = MapGraph(str(tmp_path / "g.json"), world={here: {here, exit_map}, exit_map: {here, dock},
+                                                  dock: {exit_map, gym}})
+    assert g.route(here, gym) == exit_map, "the real exit is the first hop"
+    assert g.route(here, gym, blocked={exit_map}) is None, "w/ the exit blocked no hop exists, never the map itself"
+
+
 def test_version_2_ferry_gate_reopens_at_current_cap(tmp_path):
     """A Seagallop dock->Three Island arm gated by an older executor (version 2) under the live
     8-badge field-move set must read open once EXECUTOR_CAP_VERSION advances past it, so routing
@@ -109,6 +119,35 @@ def test_version_5_approach_gate_reopens_at_current_cap(tmp_path):
     g.gate_badges[edge] = 8
     g.gate_version[edge] = 5
     assert g.route(here, dock, field_moves=moves) == dock
+
+
+def test_source_version_changes_when_a_nav_file_is_edited(tmp_path):
+    """The gate version derives from the navigation sources' bytes, so editing any of them (a wedge
+    fix) yields a different token, which is what _gate_shut reads to grant a stale gate one retry."""
+    import map_graph
+    a, b = tmp_path / "a.py", tmp_path / "b.py"
+    a.write_text("x = 1\n")
+    b.write_text("y = 2\n")
+    files = [str(a), str(b)]
+    before = map_graph._source_version(files)
+    assert before == map_graph._source_version(files), "same bytes must give the same token"
+    a.write_text("x = 2\n")
+    assert map_graph._source_version(files) != before, "an edit must change the token"
+
+
+def test_gate_recorded_under_a_different_token_reopens(tmp_path):
+    """A gate carrying a token other than the current one was recorded under different nav code,
+    so it reads open for one retry; a gate at the current token stays shut."""
+    import map_graph
+    here, dst = (0, 1), (0, 2)
+    moves = frozenset({"SURF"})
+    g = map_graph.MapGraph(str(tmp_path / "g.json"), world={here: {dst}})
+    edge = (here, dst)
+    g.gated[edge] = moves
+    g.gate_version[edge] = "src:staletoken00"
+    assert g.route(here, dst, field_moves=moves) == dst, "stale-token gate must reopen"
+    g.gate_version[edge] = map_graph.EXECUTOR_CAP_VERSION
+    assert g.route(here, dst, field_moves=moves) is None, "current-token gate must stay shut"
 
 
 if __name__ == "__main__":

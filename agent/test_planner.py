@@ -69,11 +69,24 @@ def main() -> None:
         assert allclosed["mode"] == "explore", allclosed
         os.remove(planner.GYM_CLOSED)
 
-        # every Hoenn gym beaten and no gym the walk can route to: the run travels to Three Island
-        # and never grinds Hoenn again, even short of cap, since the grass raises nothing at the cap
+        # every Hoenn gym beaten: the Sevii leg takes over off the badge table and never grinds Hoenn
+        # again, even short of cap, since the grass raises nothing at the cap. With no ferry route
+        # learned in this graph it explores toward a frontier rather than re-entering a gym
         done = planner.recommend(_status((0, 17), 8, set(range(8))), graph)[0]
-        assert done["mode"] == "travel" and done["to"] == [0, 79], done
+        assert done["mode"] == "explore", done
         assert done["mode"] != "grind", done
+
+        # part 4: Johto gyms gate off the ROM badge-gate scan, not the loss record. At 8 badges
+        # Falkner (2,7) gate badge 8 is open while Bugsy (2,8) and Whitney (2,9) are shut; a 10th
+        # badge opens Whitney. A Hoenn gym is never badge-gated this way, it keeps its loss record.
+        sc8 = planner.still_closed(_status((0, 79), 8, set(range(8))), graph)
+        assert (2, 7) not in sc8 and (2, 8) in sc8 and (2, 9) in sc8, sc8
+        sc10 = planner.still_closed(_status((0, 79), 10, set(range(8)), johto={0, 1}), graph)
+        assert (2, 9) not in sc10, sc10
+        with open(planner.GYM_CLOSED, "w") as f:
+            json.dump([{"gym": [8, 1], "reason": "loss", "min_level": 99, "field_moves": []}], f)
+        assert (8, 1) in planner.still_closed(_status((0, 17), 1, {0}), graph), "Hoenn loss still shuts"
+        os.remove(planner.GYM_CLOSED)
 
         # step 2: grind anchors on the next gym and ranks visited grass by hops then ROM wild
         # level. Route 101 (0,16), Route 102 (0,17) and Route 103 (0,19) walked, anchored on
@@ -196,12 +209,19 @@ def main() -> None:
         os.close(fdb)
         os.remove(gpb)
         try:
-            fac = planner.build_graph(gpb, flags=script_decode.gate_flags())
+            fac = planner.build_graph(gpb, flags=script_decode.gate_flags(), tickets=frozenset({0x335}))
             assert fac.script, "build_graph must load the script-warp layer"
             assert fac.flags == set(script_decode.gate_flags()), fac.flags
-            assert (0, 75) in fac._script_dests((13, 10)), "Seagallop dock routes to One Island (0,75)"
+            assert (0, 75) in fac._script_dests((13, 10)), "the mainland dock keeps One Island (0,75), ticket held"
             blind = map_graph.MapGraph(gpb, world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs())
             assert not blind._script_dests((13, 10)), "a graph without the script layer is ferry-blind"
+            # the mainland docks only keep an island arm whose ticket is in the bag: with One Island's
+            # (0x335) held the Two Island arm (0,76) is dropped so routing cannot loop on the ticketless
+            # row, while the free Mt. Ember dispatcher (33,8) keeps it since it needs no ticket
+            assert (0, 76) not in fac._script_dests((13, 10)), "the unticketed Two Island dock arm is dropped"
+            assert (0, 76) in fac._script_dests((33, 8)), "the free dispatcher keeps the Two Island arm"
+            noticket = planner.build_graph(gpb, flags=script_decode.gate_flags())
+            assert (0, 75) not in noticket._script_dests((13, 10)), "no ticket held drops even the One Island dock arm"
             # a gated ferry arm needs its flag: flag 3284 opens the (13,10)->(26,9) arm
             assert (26, 9) not in planner.build_graph(gpb, flags=frozenset())._script_dests((13, 10))
             assert (26, 9) in planner.build_graph(gpb, flags=frozenset({3284}))._script_dests((13, 10))
@@ -209,55 +229,73 @@ def main() -> None:
             if os.path.exists(gpb):
                 os.remove(gpb)
 
-        # bug2: with the ferry-aware graph the ladder reaches Johto. From a Hoenn map (0,4) at 8
-        # Hoenn badges and 0 Johto, hops_from crosses the Seagallop arms the same way route does, so
-        # the nearest unbeaten gym is Falkner (2,7), never an explore.
+        # bug2: with the ferry-aware graph the ladder reaches Johto. From a Hoenn map (0,4) at 8 Hoenn
+        # badges and 0 Johto, Falkner (2,7) is routable over the Seagallop arms: One Island's ticket is
+        # held, so the mainland dock reaches One Island and the free field dispatchers carry the party
+        # onward with no ticket handout, and the Sevii leg heads straight at the gym, never a phantom
+        # ticket clerk (the Hoenn-dock "clerk" runs the ROWE options menu, not a ticket giver).
         fdj, gpj = tempfile.mkstemp(suffix=".json")
         os.close(fdj)
         os.remove(gpj)
         try:
-            gj = planner.build_graph(gpj, flags=script_decode.gate_flags())
+            gj = planner.build_graph(gpj, flags=script_decode.gate_flags(), tickets=frozenset({0x335}))
             johto = _status((0, 4), 8, set(range(8)), cap_level=50)
             johto["field_moves"] = ["SURF", "WATERFALL", "DIVE"]
+            johto["tickets"] = [0x335]
             jg, jwhy = planner.recommend(johto, gj)
             assert jg["mode"] == "gym" and jg["map"] == [2, 7], (jg, jwhy)
         finally:
             if os.path.exists(gpj):
                 os.remove(gpj)
 
-        # 8 Hoenn badges and no gym the walk can route to (the Johto ferry rows report locked and
-        # gate out): the run never grinds Hoenn again, it travels to Three Island (0,79), the open
-        # ferry row. a ferry-blind graph stands in for every Johto gym gated off, the complement of
-        # the bug2 case above where the ferry is open and the gym routes.
+        # 8 Hoenn badges and no ferry route learned (a ferry-blind graph stands in for every Sevii
+        # gym gated off): the run never grinds Hoenn again, the Sevii leg explores toward a frontier
+        # instead. The complement is the synthetic gym-routes case below, where the ferry is open.
         fds, gps = tempfile.mkstemp(suffix=".json")
         os.close(fds)
         os.remove(gps)
         try:
             gsev = map_graph.MapGraph(gps, world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs())
             sevgoal, sevwhy = planner.recommend(_status((0, 36), 8, set(range(8)), cap_level=50), gsev)
-            assert sevgoal["mode"] == "travel" and sevgoal["to"] == [0, 79], (sevgoal, sevwhy)
+            assert sevgoal["mode"] == "explore", (sevgoal, sevwhy)
             assert sevgoal["mode"] != "grind", sevwhy
         finally:
             if os.path.exists(gps):
                 os.remove(gps)
 
-        # sevii_goal scoping, pinned on a synthetic graph so the ROM table can't move it: Three
-        # Island unwalked -> travel there; walked -> explore the nearest unvisited map reachable from
-        # it ((0,80) at one hop beats (0,82) at two, and visited (0,81) is skipped), never grind
+        # sevii_goal: once the 8 Hoenn badges are in, target the lowest-indexed unbeaten Sevii gym
+        # from the badge table (Falkner, (2,7)) and route to it over the ferry, never nearest-by-hops
+        st = {"map": [0, 79], "badges": 8, "field_moves": [],
+              "badge_flags": [True] * 8, "johto_flags": [False] * 8,
+              "party": [{"level": 80, "moves": [{"power": 40, "pp": 10}]}] * 6}
         fdv, gpv = tempfile.mkstemp(suffix=".json")
         os.close(fdv)
         os.remove(gpv)
         try:
             sv = map_graph.MapGraph(gpv)
             sv.cur_badges = 8
-            sv.world = {(0, 79): {(0, 80), (0, 81)}, (0, 80): {(0, 82)}}
-            assert planner.sevii_goal(sv, frozenset())[0] == {"mode": "travel", "to": [0, 79]}
-            sv.visited.update({(0, 79), (0, 81)})
-            isl = planner.sevii_goal(sv, frozenset())[0]
-            assert isl == {"mode": "explore", "to": [0, 80], "cap": None}, isl
+            sv.world = {(0, 79): {(13, 10)}, (13, 10): {(0, 75)}, (0, 75): {(2, 7)}}
+            goal = planner.sevii_goal(sv, frozenset(), st)[0]
+            # stand [4,3] is the tile below Falkner's object at (4,2), read off the ROM by leader_stand
+            assert goal == {"mode": "gym", "map": [2, 7], "badges": 8, "flags": 8, "stand": [4, 3]}, goal
         finally:
             if os.path.exists(gpv):
                 os.remove(gpv)
+        # no ferry route to the gym: explore toward the nearest unvisited map ((0,80) one hop beats
+        # (0,82) two, visited (0,81) skipped), never the gym and never the map underfoot
+        fdn, gpn = tempfile.mkstemp(suffix=".json")
+        os.close(fdn)
+        os.remove(gpn)
+        try:
+            sv2 = map_graph.MapGraph(gpn)
+            sv2.cur_badges = 8
+            sv2.world = {(0, 79): {(0, 80), (0, 81)}, (0, 80): {(0, 82)}}
+            sv2.visited.add((0, 81))
+            g2 = planner.sevii_goal(sv2, frozenset(), st)[0]
+            assert g2 == {"mode": "explore", "to": [0, 80], "cap": None}, g2
+        finally:
+            if os.path.exists(gpn):
+                os.remove(gpn)
 
         # hops_from applies _gate_shut, the same test route uses, so a ferry gate recorded by an
         # older executor (version below the current cap) no longer hides a gym the walk can now cross,

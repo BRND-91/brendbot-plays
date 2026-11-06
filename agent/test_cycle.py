@@ -31,7 +31,7 @@ def _player(mode="explore") -> Player:
     p.g = _Emu()
     p.goal = {"mode": mode}
     p.keep_state = False
-    p._blocked, p._stuck, p._bounces = {}, {}, {}
+    p._blocked, p._bounced, p._stuck, p._bounces = {}, {}, {}, {}
     p._last_hop, p._returned = None, False
     p._visit_log = collections.deque(maxlen=CYCLE_WINDOW)
     p._landing_exits = lambda: {(1, 1), (2, 2)}  # not a dead end, so only the cycle guard can fire

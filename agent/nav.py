@@ -28,6 +28,14 @@ ELEV_MULTI = 7
 ELEV_LAND = 3  # the common ground height; the only height a surfer may dismount onto or mount from
 # surfable-water behaviors (pond through ocean). Water is foot-impassable and surf-only.
 WATERFALL = 0x13  # pokeemerald MB_WATERFALL, numbered inside the water range
+# MB_THIN_ICE: the first step onto it cracks it, stepping back on breaks it and the game warps to the
+# map's hole warp at the same x,y (Icefall Cave (1,27) tile (8,14) dropped the walk onto (1,28))
+THIN_ICE = 0x26
+# MB_ICE: a press slides the player on at 8 frames a tile until the tile ahead is blocked or the
+# tile landed on is not ice (ForcedMovement_Slide), so one press is a multi-tile move the path
+# search has to land where the game does (the Seven Island gym (2,13), an ice floor w/ stop squares)
+ICE = 0x20
+SLIDE_SETTLE_FRAMES = 20  # a slide still moving changes tile inside this; no change means it stopped
 WATER_BEHAVIORS = frozenset(range(0x10, 0x16)) - {WATERFALL}
 # MetatileBehavior_IsDiveable: the water a surfer presses A on to submerge. Surfacing from an
 # underwater map is the inverse test (MetatileBehavior_IsUnableToEmerge over a fixed dive-warp
@@ -54,6 +62,15 @@ GATE_SETTLE_FRAMES = 40  # a rotating gate's quarter turn finishes inside this a
 # its yes/no prompt removes it (EventScript_CutTree, EventScript_RockSmash), freeing the tile.
 CLEARABLE_OBSTACLES = {82: "CUT", 86: "ROCKSMASH"}
 CLEAR_TICKS = 10  # 30-frame samples the cut or smash interaction may take to remove the object
+# A Strength boulder is an object event the walker shoves one tile ahead by walking into it, once
+# the Power Glove prompt on any boulder of the map has been accepted (ROWE's stand-in for HM04; the
+# Yes sets the flag below and the game drops it with the map). The push lands the player on the
+# boulder's tile and the boulder on the tile past it, so a route may cross a boulder whose far side
+# is open floor at the boulder's height, and the path search carries the boulders it has moved.
+PUSHABLE_BOULDER = 87  # OBJ_EVENT_GFX_PUSHABLE_BOULDER
+FLAG_POWER_GLOVE = 0xCF9  # the one flag the boulder prompt's Yes flips, read on Victory Road B1F
+PUSH_FRAMES = 60  # held frames before the player's tile changes on a push; 34 measured
+PUSH_SETTLE_FRAMES = 40  # the slow walk that finishes the push after the tile change
 
 # A directional ledge: one press in the ledge's own direction hops the player two tiles that way,
 # over the ledge tile, and the reverse is refused. Values are the pokeemerald MB_JUMP_* behaviors.
@@ -102,6 +119,7 @@ class Grid:
         self.cells = struct.unpack(f"<{w * h}H", emu.read(ptr, w * h * 2))
         self.blocked_by_npc = set()
         self.clearable = {}   # (x, y) -> the field tool that removes the tree or rock on that tile
+        self.pushable = set()  # tiles holding a Strength boulder, walked through by pushing it
         # a warp tile (cave hole, ladder, stairs, door mat) reads as open floor but fires a
         # map change the instant it is stepped on, so a route that is not aiming at it must
         # go around; _path drops it unless it is the goal
@@ -130,8 +148,11 @@ class Grid:
                 continue
             cx, cy = struct.unpack_from("<hh", raw, S.OBJ_CURRENT_COORDS)
             tile = (cx - S.MAP_OFFSET, cy - S.MAP_OFFSET)
-            self.blocked_by_npc.add(tile)
             gfx = struct.unpack_from("<H", raw, S.OBJ_GRAPHICS_ID)[0]
+            if gfx == PUSHABLE_BOULDER:
+                self.pushable.add(tile)
+                continue
+            self.blocked_by_npc.add(tile)
             if gfx in CLEARABLE_OBSTACLES:
                 self.clearable[tile] = CLEARABLE_OBSTACLES[gfx]
 
@@ -149,6 +170,7 @@ class Grid:
         g.cells = tuple(buf)
         g.blocked_by_npc = set()
         g.clearable = {}
+        g.pushable = set()
         g.warp_tiles = set()
         g._behavior = None
         return g
@@ -264,13 +286,44 @@ class Grid:
             return True
         return here in LEAVE_BLOCKED[d] or there in ENTER_BLOCKED[d]
 
-    def _steps(self, cur: tuple, carried: int, origin: tuple, surf: bool):
+    def _push_ok(self, tile: tuple, d: tuple, carried: int, origin: tuple, surf: bool, boulders: frozenset) -> bool:
+        """A step in d onto the boulder at `tile` pushes it: the tile past it is open floor at the
+        boulder's height (the game's GetCollisionAtCoords for the boulder: no wall, object, height
+        change or ledge, and no warp mat so the push never seals a door) and the walker can stand
+        where the boulder was."""
+        beyond = (tile[0] + d[0], tile[1] + d[1])
+        if not self.inside(*beyond) or beyond in boulders or beyond in self.blocked_by_npc or beyond in self.warp_tiles:
+            return False
+        c = self.cell(*beyond)
+        if c & S.GRID_ID_MASK == S.GRID_UNDEFINED or c & S.GRID_BLOCKED:
+            return False
+        if self._is_water(*beyond) or self._is_waterfall(*beyond) or self._current(*beyond) is not None or self._ledge_hop(*beyond) is not None:
+            return False
+        elev, here = c >> S.GRID_ELEVATION_SHIFT, self.cell(*tile) >> S.GRID_ELEVATION_SHIFT
+        if elev not in (ELEV_TRANSITION, ELEV_MULTI) and elev != here:
+            return False
+        return self.passable(*tile, carried, origin, surf)
+
+    def _after_push(self, cur: tuple, d: tuple, boulders: frozenset) -> frozenset:
+        """The boulder set once a step from cur in d lands: a boulder on the next tile moves one
+        tile on in d, anything else leaves the set as it is."""
+        adj = (cur[0] + d[0], cur[1] + d[1])
+        if adj not in boulders:
+            return boulders
+        return (boulders - {adj}) | {(adj[0] + d[0], adj[1] + d[1])}
+
+    def _steps(self, cur: tuple, carried: int, origin: tuple, surf: bool, boulders: frozenset = frozenset()):
         """Tiles reachable from cur in one key press, each paired with the direction pressed. A
         ledge one tile away in its own hop direction lands the player two tiles over for a single
-        press, so the ledge tile never holds the player and the crossing is one-way."""
+        press, so the ledge tile never holds the player and the crossing is one-way. `boulders`
+        is where the Strength boulders stand along the search's own path; a boulder's tile is
+        entered only by a push that _push_ok allows."""
         for d in DIRS:
             adj = (cur[0] + d[0], cur[1] + d[1])
-            if self._current(*adj) is not None:
+            if adj in boulders:
+                if self._push_ok(adj, d, carried, origin, surf, boulders):
+                    yield adj, d
+            elif self._current(*adj) is not None:
                 land = self._ride(adj) if surf else None
                 if land is not None and (not self.inside(*land) or self.passable(*land, carried, origin, surf)):
                     yield land, d
@@ -296,7 +349,20 @@ class Grid:
                 if (surf and self._is_water(*adj) and not self._is_water(*cur)
                         and carried != S.SURF_ELEVATION and not self._can_mount(carried)):
                     continue
-                yield adj, d
+                yield self._slide(adj, d, carried, origin, surf), d
+
+    def _is_ice(self, x: int, y: int) -> bool:
+        return self._behavior is not None and self._behavior(self.cell(x, y) & S.GRID_ID_MASK) == ICE
+
+    def _slide(self, tile: tuple, d: tuple, carried: int, origin: tuple, surf: bool) -> tuple:
+        """Where a step onto `tile` heading d ends: `tile` itself off ice, else the slide carries
+        on in d while the tile ahead is open and stops on the first tile that is not ice."""
+        while self._is_ice(*tile):
+            ahead = (tile[0] + d[0], tile[1] + d[1])
+            if not self.inside(*ahead) or not self.passable(*ahead, carried, origin, surf) or self._step_refused(tile, ahead, d):
+                break
+            tile = ahead
+        return tile
 
     @staticmethod
     def _can_mount(carried: int) -> bool:
@@ -323,34 +389,45 @@ class Grid:
     def region(self, start: tuple, surf: bool = False) -> tuple:
         """Smallest tile reachable from start. Every tile of one walkable area yields the same
         value, so a map split by a ledge or water (Route 104 either side of the Woods) reads
-        as two regions and a block learned in one does not bind the other."""
+        as two regions and a block learned in one does not bind the other. A ledge hop is left
+        out, since it is one-way: the summit of Mt. Ember reaches the base by jumping down, so
+        following ledges gave both the base's label and the summit inherited the base's blocks."""
+        return self.region_tiles(start, surf)[0]
+
+    def region_tiles(self, start: tuple, surf: bool = False) -> tuple:
+        """(region label, every tile the region walk visited), so a caller labelling many tiles
+        of one area runs the walk once instead of once per tile."""
         start_elev = self._start_elev(start)
-        seen = {(start, start_elev)}
-        q = deque([(start, start_elev)])
+        boulders = frozenset(self.pushable)
+        seen = {(start, start_elev, boulders)}
+        q = deque([(start, start_elev, boulders)])
         low = start
         while q:
-            cur, carried = q.popleft()
+            cur, carried, boulders = q.popleft()
             low = min(low, cur)
-            for nxt, _ in self._steps(cur, carried, start, surf):
-                key = (nxt, self._carry(nxt, carried, surf))
+            for nxt, d in self._steps(cur, carried, start, surf, boulders):
+                if self._ledge_hop(cur[0] + d[0], cur[1] + d[1]) == d:
+                    continue
+                key = (nxt, self._carry(nxt, carried, surf), self._after_push(cur, d, boulders))
                 if key not in seen:
                     seen.add(key)
                     q.append(key)
-        return low
+        return low, {tile for tile, _, _ in seen}
 
     def reachable(self, start: tuple, surf: bool = False) -> set:
         """Every tile walkable from start under the same elevation and NPC rules as region()."""
         start_elev = self._start_elev(start)
-        seen = {(start, start_elev)}
-        q = deque([(start, start_elev)])
+        boulders = frozenset(self.pushable)
+        seen = {(start, start_elev, boulders)}
+        q = deque([(start, start_elev, boulders)])
         while q:
-            cur, carried = q.popleft()
-            for nxt, _ in self._steps(cur, carried, start, surf):
-                key = (nxt, self._carry(nxt, carried, surf))
+            cur, carried, boulders = q.popleft()
+            for nxt, d in self._steps(cur, carried, start, surf, boulders):
+                key = (nxt, self._carry(nxt, carried, surf), self._after_push(cur, d, boulders))
                 if key not in seen:
                     seen.add(key)
                     q.append(key)
-        return {tile for tile, _ in seen}
+        return {tile for tile, _, _ in seen}
 
     def dive_tiles(self, start: tuple, surf: bool = True) -> list:
         """Reachable tiles whose behavior carries a dive or emerge warp, nearest to start first.
@@ -391,21 +468,22 @@ class Grid:
 
     def _path(self, start: tuple, goal: tuple, surf: bool) -> list | None:
         start_elev = self._start_elev(start)
-        prev = {(start, start_elev): None}
-        q = deque([(start, start_elev)])
+        boulders = frozenset(self.pushable)
+        prev = {(start, start_elev, boulders): None}
+        q = deque([(start, start_elev, boulders)])
         reached = None
         while q:
-            cur, carried = q.popleft()
+            cur, carried, boulders = q.popleft()
             if cur == goal:
-                reached = (cur, carried)
+                reached = (cur, carried, boulders)
                 break
-            for nxt, d in self._steps(cur, carried, start, surf):
+            for nxt, d in self._steps(cur, carried, start, surf, boulders):
                 if nxt in self.warp_tiles and nxt != goal:
                     continue
-                key = (nxt, self._carry(nxt, carried, surf))
+                key = (nxt, self._carry(nxt, carried, surf), self._after_push(cur, d, boulders))
                 if key in prev:
                     continue
-                prev[key] = ((cur, carried), d)
+                prev[key] = ((cur, carried, boulders), d)
                 q.append(key)
         if reached is None:
             return None
@@ -431,8 +509,9 @@ class Navigator:
                 return
             self.run(5, 0)
 
-    def step(self, d: tuple) -> bool:
-        """Hold a direction until the tile changes; False when nothing moved."""
+    def step(self, d: tuple, slide: bool = False) -> bool:
+        """Hold a direction until the tile changes; False when nothing moved. With `slide` the
+        step is onto ice, so wait until the tile stops changing before the next press lands."""
         x, y, *_ = self.g.position()
         key = DIRS[d]
         for _ in range(24):
@@ -440,6 +519,11 @@ class Navigator:
             nx, ny, *_ = self.g.position()
             if (nx, ny) != (x, y):
                 self.run(10, 0)
+                while slide:
+                    last = self.g.position()[:2]
+                    self.run(SLIDE_SETTLE_FRAMES, 0)
+                    if self.g.position()[:2] == last:
+                        break
                 return True
             if self.g.in_battle():
                 return False
@@ -469,6 +553,13 @@ class Navigator:
         mounting Surf when the step crosses from land onto water. Dismount is automatic on the
         step back onto land, so it needs no extra press."""
         nxt = (cur[0] + d[0], cur[1] + d[1])
+        if nxt in grid.pushable:
+            if not self._push(d):
+                return False
+            # the plan's later steps were searched against the boulder's new tile
+            grid.pushable.discard(nxt)
+            grid.pushable.add((nxt[0] + d[0], nxt[1] + d[1]))
+            return True
         tool = grid.clearable.get(nxt)
         if tool is not None and tool in grid.tools:
             if not self._clear_obstacle(nxt, d):
@@ -481,7 +572,7 @@ class Navigator:
             # belt needs the Surf prompt before the ride starts
             if not grid._is_water(*cur) and (grid._is_water(*nxt) or grid._current(*nxt) is not None):
                 return self._mount(d)
-        return self.step(d)
+        return self.step(d, slide=grid._is_ice(*nxt))
 
     def _clear_obstacle(self, nxt: tuple, d: tuple) -> bool:
         """Face the tree or rock at `nxt` and run its field-move interaction: the facing A opens
@@ -499,6 +590,33 @@ class Navigator:
             if nxt not in Grid(self.e).blocked_by_npc:
                 return True
         return nxt not in Grid(self.e).blocked_by_npc
+
+    def _push(self, d: tuple) -> bool:
+        """Shove the boulder one tile ahead by holding d into it, after accepting the map's Power
+        Glove prompt once. The player's tile changes while the slow push walk is still running,
+        so the settle idles through it before the next press. False when nothing moved."""
+        if not self.g.flag(FLAG_POWER_GLOVE):
+            self._accept_power_glove(d)
+        x, y, *_ = self.g.position()
+        for _ in range(PUSH_FRAMES // 2):
+            self.run(2, DIRS[d])
+            if self.g.position()[:2] != (x, y):
+                self.run(PUSH_SETTLE_FRAMES, 0)
+                return True
+            if self.g.in_battle():
+                return False
+        self.run(4, 0)
+        return False
+
+    def _accept_power_glove(self, d: tuple) -> None:
+        """Face the boulder and answer its prompt: A opens "do you want to use the Power Glove to
+        push it?", A takes the default Yes, and a third A closes the line that follows. A push
+        pressed inside that last line's window stays dead, hence the idle after it."""
+        self.run(4, DIRS[d])
+        self.run(2, 0)
+        for idle in (40, 40, 60):
+            self.run(8, eb.KEY_A)
+            self.run(idle, 0)
 
     def _climb(self) -> bool:
         """Face the fall and accept the Waterfall Tool prompt; the ride ends on the first tile

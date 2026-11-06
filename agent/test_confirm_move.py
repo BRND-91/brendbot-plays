@@ -13,6 +13,7 @@ UP_NEIGHBOR = {0: 0, 1: 1, 2: 0, 3: 1}
 
 class FakeMon:
     pp = ZERO_PP
+    personality = 1
 
 
 class FakeGame:
@@ -35,6 +36,7 @@ class FakePlayer:
     def __init__(self, drops=0, double=False):
         self.g = FakeGame(drops, double)
         self.taps = []
+        self._used_slots = {}
 
     def run(self, frames, keys=0):
         pass

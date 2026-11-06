@@ -257,17 +257,25 @@ def battle_decides_under_the_alt_action_menu():
 
 @check
 def battle_wedge_bails_fast_and_live_battles_do_not():
-    # battle_wedge.ss is a live dump of a trainer fight frozen on the Shelmet->Spinda switch-in:
-    # the controller func, battlescript instr, cb2 and HP/PP all hold across steps and no button
-    # moves it, so the run burned ~88s of "clearing submenu" before the 60-step STALL. The wedge
-    # bail stops it in WEDGE_STEPS. The live fixtures run a battle to a finish without tripping it,
-    # which is what keeps a long animation from being read as a freeze.
+    # A frozen battle is one no input moves: the controller func, battlescript instr, cb2 and HP/PP
+    # hold across every step, so the run would burn the full 60-step STALL. The bail stops it in
+    # WEDGE_STEPS. FrozenPlayer makes its presses no-ops, which is that freeze exactly, since the
+    # move the game refuses is modelled by a press that changes nothing. Under real input the move-
+    # list steer now wins battle_wedge.ss outright, so it joins the live fixtures that run a battle
+    # to a finish without the bail firing, which keeps a long animation from reading as a freeze.
     import play
     from play import StopRequested, WEDGE_STEPS
 
-    def run(name, steps):
+    class FrozenPlayer(play.Player):
+        def tap(self, *a, **k):
+            return
+
+        def run(self, *a, **k):
+            return
+
+    def run_steps(cls, name, steps):
         e = _load(name)
-        ex = play.Player(e, play.NullStreamer(), ledger_path="/tmp/rowe-smoke-caught.json")
+        ex = cls(e, play.NullStreamer(), ledger_path="/tmp/rowe-smoke-caught.json")
         ex._wedge, ex._wedge_sig = 0, None
         for n in range(1, steps + 1):
             if not ex.g.in_battle():
@@ -278,12 +286,13 @@ def battle_wedge_bails_fast_and_live_battles_do_not():
                 return ex.stalled, n
         return False, steps
 
-    bailed, n = run("battle_wedge.ss", 120)
-    assert bailed, "wedged battle never bailed"
+    bailed, n = run_steps(FrozenPlayer, "battle_wedge.ss", 120)
+    assert bailed, "a battle no input moves never bailed"
     assert n <= WEDGE_STEPS + 2, f"bail took {n} steps, past WEDGE_STEPS {WEDGE_STEPS}"
-    for name, steps in [("trainer_altmenu.ss", 90), ("roxanne.ss", 120), ("battle_disabled.ss", 40)]:
-        bailed, _ = run(name, steps)
-        assert not bailed, f"{name} false-tripped the wedge bail"
+    for name, steps in [("battle_wedge.ss", 120), ("trainer_altmenu.ss", 90),
+                        ("roxanne.ss", 120), ("battle_disabled.ss", 40)]:
+        bailed, _ = run_steps(play.Player, name, steps)
+        assert not bailed, f"{name} false-tripped the wedge bail under real input"
 
 
 @check
@@ -678,6 +687,39 @@ def map_graph_routes_through_a_warp_loop_past_a_blocked_edge():
 
 
 @check
+def route_returns_to_the_source_map_through_a_multi_map_chain():
+    # Mt. Ember (33,8): the Seagallop dispatcher sits on the summit pocket, which the base region
+    # reaches only through the summit path (1,20) -> (33,10) -> (33,11) and back onto (33,8). No
+    # single map in that chain is a pass-through, so the chain itself must carry the re-entry,
+    # while a one-map return (a house door) stays forbidden
+    import tempfile
+    import map_graph
+    world = {(33, 8): {(1, 19), (1, 20), (33, 9), (0, 76)}, (1, 20): {(33, 8), (33, 10)},
+             (33, 10): {(1, 20), (33, 11)}, (33, 11): {(33, 10), (33, 8)}, (1, 19): {(33, 8)},
+             (33, 9): {(33, 8)}, (0, 76): {(33, 8), (2, 8)}, (2, 8): {(0, 76)}}
+    with tempfile.TemporaryDirectory() as d:
+        g = map_graph.MapGraph(os.path.join(d, "g.json"), world=world)
+        assert g.route((33, 8), (2, 8)) == (0, 76), "direct ferry arm not taken when nothing is blocked"
+        assert g.route((33, 8), (2, 8), blocked={(0, 76), (33, 9)}) == (1, 20), "summit path not routed when the arm is blocked from this region"
+        assert g.route((33, 8), (2, 8), blocked={(0, 76), (33, 9), (1, 20)}) is None, "Kindle Road re-entered the source map as a one-map return"
+
+
+@check
+def region_does_not_follow_a_ledge_down():
+    # Mt. Ember (33,8): the summit-path exit lands at (39,19), from which ledges drop one-way into
+    # the dispatcher's pocket and on to the base. With ledges followed, the summit and the base share
+    # a region label, so the arms blocked from the base bound the summit and the walk jumped back
+    # down without ever driving the dispatcher
+    import nav
+    e = _load("mt_ember_base.ss")
+    g = nav.Grid(e)
+    base, summit = (25, 38), (39, 19)
+    assert g.region(base) == (7, 33), f"base region label moved: {g.region(base)}"
+    assert g.region(summit) != g.region(base), "summit landing shares the base's region label"
+    assert (29, 15) in g.reachable(summit), "dispatcher neighbour (29,15) not reachable from the summit landing"
+
+
+@check
 def rom_world_links_route104_to_the_woods_and_rustboro_to_its_gym():
     import rowe_rom as rr
     world = rr.world_edges()
@@ -758,7 +800,7 @@ def shopping_list_waits_for_a_town_unless_the_trek_is_earned():
     saved = play.SERVICE, play.SERVICE_MAPS
     play.SERVICE = {town: ((0, 0), (0, 0))}
     play.SERVICE_MAPS = {town: frozenset({town})}
-    ex.service_town = lambda h: town
+    ex.service_town = lambda h, mart=False: town
     try:
         ex.overworld_step(0)
         assert calls == ["grind"], f"a pending list w/o a trek left the route: {calls}"

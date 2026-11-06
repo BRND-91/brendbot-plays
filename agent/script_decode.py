@@ -379,17 +379,28 @@ def gate_flags() -> frozenset:
     return frozenset(f for d in script_edges().values() for gate in d.values() for f in gate)
 
 
+# pokeemerald MOVEMENT_TYPE_FACE_{UP,DOWN,LEFT,RIGHT} -> the offset from the object to the tile you
+# stand on to talk to it, the side the NPC faces. The Hoenn dock sailors face down (stand below); the
+# Three Island sailor is FACE_UP (7), so its approach is the tile above, which the old below-tile
+# hardcode could not reach from the party's landing.
+_FIXED_APPROACH = {7: (0, -1), 8: (0, 1), 9: (-1, 0), 10: (1, 0)}
+
+
 def talk_object(src: tuple, dest: tuple) -> dict | None:
     """The object on map src whose A-press script reaches a warp to dest, with the tile to stand on
-    and the direction to face it. None when no object's script warps there. The approach is the tile
-    below the object facing up, the side a dock sailor is read from; an object that can only be faced
-    from another side would need its movement type consulted, which the dock does not."""
+    and the direction to face it. None when no object's script warps there. A fixed-facing object
+    (movement 7-10) is approached from the side it faces, resolved from its movement type; any other
+    type (wander, look-around) has no fixed side, so approach and facing come back None and the caller
+    picks a walkable neighbour off the live collision grid."""
     for idx, x, y, mv, addr in R.map_object_scripts(src[0], src[1]):
         if not R._in_rom(addr):
             continue
         if any(d == dest for d, _wid, _gate in _warp_paths(addr)):
-            return {"index": idx, "obj": (x, y), "approach": (x, y + 1),
-                    "facing": (0, -1), "movement": mv, "script": addr}
+            off = _FIXED_APPROACH.get(mv)
+            approach = (x + off[0], y + off[1]) if off else None
+            facing = (-off[0], -off[1]) if off else None
+            return {"index": idx, "obj": (x, y), "approach": approach,
+                    "facing": facing, "movement": mv, "script": addr}
     return None
 
 
@@ -398,7 +409,6 @@ def talk_object(src: tuple, dest: tuple) -> dict | None:
 # menu lists (Slateport City, then One..Eight Island) map to the ferry's ungated warp arms in
 # ascending map order; (9,9) Slateport City and (0,79) Three Island are land-verified on the (13,10)
 # fixture. talk_warp matches these labels against the live option array.
-SEAGALLOP_DOCKS = frozenset({(9, 9), (13, 10)})
 _SEAGALLOP_LABELS = {
     (9, 9): "Slateport City",
     (0, 75): "One Island",
@@ -410,14 +420,86 @@ _SEAGALLOP_LABELS = {
     (1, 66): "Seven Island",
     (2, 14): "Eight Island",
 }
+# the three vanilla Hoenn/Three-Island docks are fixed; ROWE scatters the same island menu onto field
+# dispatchers (Mt. Ember's (33,8), the island resorts) whose script fans to the island warps the same
+# way. A dispatcher driven without a row selected A's through on the first option, One Island, and a
+# party already there loops, so every map whose script reaches two or more island warps is a dock.
+_BASE_DOCKS = frozenset({(9, 9), (13, 10), (0, 79)})
+
+
+@lru_cache(maxsize=1)
+def seagallop_docks() -> frozenset:
+    """Every map whose A-press opens the Seagallop island menu: the three vanilla docks plus each ROWE
+    field dispatcher whose script reaches two or more island warps, read off the ROM so a new
+    dispatcher map is covered without being hand-listed here."""
+    islands = frozenset(_SEAGALLOP_LABELS)
+    derived = {src for src, edges in script_edges().items() if len(islands & edges.keys()) >= 2}
+    return _BASE_DOCKS | derived
+
+
+def __getattr__(name: str):
+    # keep the SEAGALLOP_DOCKS module attribute callers read, resolved off the ROM on first touch so
+    # importing this module never forces the script-edge scan
+    if name == "SEAGALLOP_DOCKS":
+        return seagallop_docks()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def seagallop_label(src: tuple, dest: tuple) -> str | None:
-    """The menu row text that warps the Seagallop sailor on dock `src` to `dest`, or None when the
+    """The menu row text that warps the Seagallop island menu on dock `src` to `dest`, or None when the
     crossing is not a Seagallop talk (a normal script warp the walker drives through take_warp)."""
-    if src not in SEAGALLOP_DOCKS:
+    if src not in seagallop_docks():
         return None
     return _SEAGALLOP_LABELS.get(dest)
+
+
+# Island landing map -> the Sevii Ticket key item that opens its row on the Hoenn-mainland Seagallop
+# docks. Read off the island dispatcher script (every field dispatcher, Mt. Ember (33,8) first, stubs
+# into the shared script at 0x082F1B80): menu row k runs `checkitem` on ticket k+1 and, with it absent,
+# hands that ticket over before sailing (row 0 -> 0x335 .. row 6 -> 0x33b, row 7 -> 0x349 "Sevii
+# Ticket 8"), then warps by the same row index (row 2 -> (0,79) at (12,12), row 7 -> (2,14) at
+# (20,33)). So a dispatcher is both the ticket giver and the free ferry; only the mainland docks gate.
+ISLAND_TICKETS = {
+    (0, 75): 0x335,
+    (0, 76): 0x336,
+    (0, 79): 0x337,
+    (0, 123): 0x338,
+    (1, 32): 0x339,
+    (1, 58): 0x33A,
+    (1, 66): 0x33B,
+    (2, 14): 0x349,
+}
+
+# Slateport (9,9) and Lilycove (13,10) are the Hoenn-mainland Seagallop docks. Their island rows are
+# ticket-gated in native menu code the bytecode walker can't read, so script_edges decodes them ungated
+# and the router would treat every island as a free direct hop, looping on the ones whose ticket is not
+# in the bag. From these two docks only an island whose ticket is held is a real arm; the field
+# dispatchers reach every island with no ticket.
+_MAINLAND_FERRY_DOCKS = frozenset({(9, 9), (13, 10)})
+_FERRY_ISLANDS = frozenset(_SEAGALLOP_LABELS) - {(9, 9)}
+
+
+@lru_cache(maxsize=None)
+def giver_sailor_tile(src: tuple) -> tuple | None:
+    """Tile of the Seagallop sailor object on dock or dispatcher map `src`, read so the caller can
+    check its visibility flag and tell a present giver from one the ROM removed. None when src runs
+    no island arm. Every island arm resolves the same shared sailor, so the first settles it."""
+    for dest in sorted(d for d in script_edges().get(src, {}) if d in ISLAND_TICKETS):
+        t = talk_object(src, dest)
+        if t is not None:
+            return tuple(t["obj"])
+    return None
+
+
+def passable_island_arm(src: tuple, dest: tuple, held_items: frozenset) -> bool:
+    """A Hoenn-mainland dock's island arm sails only on a held Sevii ticket; a field dispatcher's
+    island arm sails only on a ticket not yet held, since its script hands that ticket over and
+    sails, and on a held one talks and reopens its list (the (1,35) sailor: One and Four rows stuck
+    w/ the list open, the ticketless Six row landed). A city arm is always passable."""
+    if dest not in _FERRY_ISLANDS:
+        return True
+    held = ISLAND_TICKETS[dest] in held_items
+    return held if src in _MAINLAND_FERRY_DOCKS else not held
 
 
 _MENU_OPS = {0x6F: "multi", 0x70: "multi", 0x71: "multi", 0x6E: "yesno"}

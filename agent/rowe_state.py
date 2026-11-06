@@ -367,11 +367,13 @@ class GameState:
         return struct.unpack("<H", self.e.read(sb1 + S.SB1_SKILL_POINTS, 2))[0]
 
     def bag_position(self) -> tuple:
-        """(pocket, cursor row within that pocket)"""
+        """(pocket, item index under the cursor in that pocket): the cursor row plus the rows
+        scrolled off the top, since the row alone stops at 4."""
         base = S.addr("gBagPosition")
         pocket = self.e.read(base + S.BAGPOS_POCKET)[0]
         cursor = struct.unpack("<H", self.e.read(base + S.BAGPOS_CURSOR + 2 * pocket, 2))[0]
-        return pocket, cursor
+        scroll = struct.unpack("<H", self.e.read(base + S.BAGPOS_SCROLL + 2 * pocket, 2))[0]
+        return pocket, cursor + scroll
 
     def action_cursor(self, battler: int = 0) -> int:
         return self.e.read(S.addr("gActionSelectionCursor") + battler)[0]

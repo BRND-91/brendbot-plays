@@ -44,5 +44,30 @@ def test_after_cross_observes_warp_linked_onward_map():
     print("OBSERVE LANDING EXITS PASS")
 
 
+def test_observe_here_folds_warp_linked_exit_of_stood_on_map():
+    """The party stands on the Three Island arrival map (2,9), which has no ROM edge-connection
+    and whose only link is the sailor-door warp back to (0,77). Observing connections alone (the
+    old overworld_step) leaves adj[(2,9)] empty, so sevii_goal's empty-adj frontier test picks
+    (2,9) as an unmapped onward map and the goal degenerates to explore-to-self. _observe_here
+    folds the live landing exits (warps included) so the back-edge enters adj and (2,9) stops
+    reading as a frontier."""
+    path = os.path.join(tempfile.mkdtemp(), "map_graph.json")
+    g = map_graph.MapGraph(path)
+    g.observe((0, 77), [(2, 9)])            # the link was only ever seen from the (0,77) side
+    assert g.adj.get((2, 9), set()) == set()  # the live wedge: (2,9) empty
+
+    p = play.Player.__new__(play.Player)
+    p.graph = g
+    p.g = type("_G", (), {"position": lambda self: (1, 6, 2, 9)})()
+    p._last_obs = None
+    p._landing_exits = lambda: {(0, 77)}   # the only reachable warp dest off (2,9)
+
+    p._observe_here((2, 9))
+
+    assert (0, 77) in g.adj[(2, 9)]        # no longer empty -> no longer a false frontier
+    print("OBSERVE HERE PASS")
+
+
 if __name__ == "__main__":
     test_after_cross_observes_warp_linked_onward_map()
+    test_observe_here_folds_warp_linked_exit_of_stood_on_map()
