@@ -55,3 +55,33 @@ for Flygon (hidden grass only); Camerupt for Houndoom (Spe 116); Starmie for Gya
    START press in the move menu once the Mega Bracelet is in the key items (11 badges).
 6. The current save keeps its six to the end; the roster applies from the next 0-badge start
    (`states/fixtures/route101.ss`).
+
+## Money, points and items
+
+Read off the live save: 320658 money, 893 BP, 116 trainer skill points unspent, stat-boost skills
+maxed (30 IVs in every stat), and all six at 510 EVs in grind-random spreads, Golduck w/ 202 Atk and
+22 Spe EVs on a SpA attacker, Greedent w/ 200 Spe on a wall. ROM prices via `rowe_rom.item_price`;
+counters via the guide db (`t_frequently_asked_questions`, `t_trainer_skills`, `t_new_abilitiesitems`).
+
+| Lever | Cost | Where | What it buys the roster |
+|---|---|---|---|
+| Ultra Ball | 600 (Great 300) | any Mart | 2x catch rate on the roster lines; the thrower spends Poké Balls only today |
+| EVs Changes skill | skill points | Trainer Skills row, then the summary screen | manual EV spreads, 252 Spe and the attacking stat per member, in place of the grind's random 510 |
+| XP Boost, Gold Rush, Bargain | skill points | Trainer Skills | faster levels, more money, 1% off per level at every counter |
+| Nature Mint | 10 BP | Oldale Battle Mart | Timid Gardevoir, Manectric, Houndoom; Jolly Gyarados, Lucario, Flygon |
+| Ability Capsule / Patch | BP (ROM money price 5000 / 10000) | Oldale Battle Mart | Moxie Gyarados, Lightning Rod Manectric, Flash Fire Houndoom, Justified Lucario |
+| Exiolite | 4500 | Oldale Battle Mart, Devon Corp 1F | a pre-evolution fights at its final form's base stats until its level row |
+| Life Orb 9000, Choice Scarf / Band / Specs 10000, Focus Sash 5000, Leftovers 2000, Expert Belt 2000, Assault Vest 10000 | money | counter not checked, Lilycove Dept Store and Eight Island Battle Mart per the guide | one held item per member for the League and the bosses |
+| Power items | 5000 | Lilycove Dept Store, Eight Island Battle Mart | 20 EVs per KO while held, the fallback when the EV editor is not driven |
+| Vitamins | 900 | Mart | moot at 510 EVs; a reassigned spread goes through the EV editor |
+
+Order for the next run. Ultra Balls from the first Mart visit once money passes 5000. Skill points into
+the six stat boosts first (already the rule), then EVs Changes to its cap, then XP Boost and Bargain.
+EV spreads set at each evolution, speed and the larger attacking stat. Mints and capsules bought w/ BP
+at Oldale as the lines are caught, held items bought before Ever Grande, the mega stone given at 11
+badges.
+
+Executor pieces, none started. `catch_plan` and `throw_ball` choose the strongest ball held
+(`catch_chance` takes a ball multiplier no caller passes); `shopping_list` adds Ultra Balls;
+`spend_skill_points` buys past the stat boosts; a BP counter errand at Oldale; a give-item errand from
+the bag; the summary-screen EV editor; a use-item errand for mints and capsules.
