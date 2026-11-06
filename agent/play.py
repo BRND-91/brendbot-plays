@@ -185,6 +185,12 @@ LEAGUE_BUYS = ((34, 10), (40, 6), (38, 6), (52, 6))
 REVIVE_ITEMS = (39, 40)  # Revive, Max Revive: a fainted mon on the League leg gets one from the bag between fights
 # post-game boss room -> (defeat flag, the tile below the trainer, faced up): Steven at (19,3), Red at (12,3)
 BOSSES = {(24, 107): (S.FLAG_DEFEATED_METEOR_FALLS_STEVEN, (19, 4)), (24, 51): (S.FLAG_DEFEATED_RED, (12, 4))}
+# Birch's lab (1,4) after the game clear: VAR_DEX_UPGRADE_JOHTO_STARTER_STATE 1 runs the National
+# Dex scene on the frame the player walks in and 4 the Johto-starter walk-up, each a lockall w/ text
+# that A advances; a stuck travel exit there reloaded the pre-ceremony save and replayed the credits
+BIRCH_LAB = (1, 4)
+VAR_JOHTO_STARTER = 0x40D3
+LAB_SCENE_STATES = (1, 4)
 
 
 def league_shopping_list(money: int, medicine: list) -> list:
@@ -3017,7 +3023,7 @@ class Player:
             if self.mart_trek:
                 self.travel_toward(town, self._door_tiles(town, SERVICE[town][1]))
                 return
-        if self.league_step(here) or self.boss_step(here):
+        if self.scene_step(here) or self.league_step(here) or self.boss_step(here):
             return
         if self.collect_step():
             return
@@ -3117,10 +3123,25 @@ class Player:
         # readable; an empty party off a field read is still the cutscene (the live crash was
         # lowest_lead on party[0] there)
         if self.g.in_battle() or (cb2 == S.CB2_OVERWORLD and self.g.party()):
+            if self._cutscene_cb2 is not None:
+                # Continue put the party somewhere new w/ the goal written before the ceremony;
+                # the exit makes replan snapshot this field and pick the post-game goal, else a
+                # later stuck exit reloads the pre-ceremony save and replays the credits
+                self._cutscene_cb2 = None
+                raise GoalExit(f"continue: field back at {list(self.g.position()[2:])} after the credits, re-planning")
             return False
         if cb2 != self._cutscene_cb2:
             self._cutscene_cb2 = cb2
             print(f"cutscene: cb2 {cb2:#x}, pressing A through it", flush=True)
+        self.tap(eb.KEY_A)
+        self.run(50)
+        return True
+
+    def scene_step(self, here: tuple) -> bool:
+        """A scripted scene that locks the player on the field until its text is advanced: one A
+        press and 50 frames, True while the scene's state var still names a running scene."""
+        if here != BIRCH_LAB or self.g.var(VAR_JOHTO_STARTER) not in LAB_SCENE_STATES:
+            return False
         self.tap(eb.KEY_A)
         self.run(50)
         return True

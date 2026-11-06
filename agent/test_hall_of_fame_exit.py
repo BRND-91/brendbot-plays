@@ -21,9 +21,14 @@ def _drive(p: play.Player, ticks: int) -> int:
     """cutscene_step off the field, league_step through the ceremony's text on it, until the field
     is back on another map; the tick count it took."""
     for t in range(ticks):
-        if not p.cutscene_step():
-            if p.g.position()[2:] != HALL_OF_FAME and p.g.party():
-                return t
+        try:
+            off_field = p.cutscene_step()
+        except play.GoalExit as g:
+            # the field's return after the credits is the continue exit, which replan takes live
+            assert str(g).startswith("continue: field back"), str(g)
+            return t
+        if not off_field:
+            assert p.g.position()[2:] == HALL_OF_FAME, f"left the ceremony w/o the continue exit at {p.g.position()}"
             assert p.league_step(HALL_OF_FAME), "league_step ran nothing on the ceremony"
     return ticks
 
