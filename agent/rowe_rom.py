@@ -36,7 +36,9 @@ SPECIES_HIDDEN_ABILITY = 0x24
 EVOLUTIONS_OFFSET = 0x5A607C
 EVOS_PER_MON = 10
 EVO_ROW = 8
-EVO_LEVEL = 4                  # the only method the planner projects; item, trade, friendship and ROWE's map-gated rows stay put
+EVO_LEVEL = 4
+EVO_LEVEL_ALT = 39             # ROWE's level row beside a trade or stone row (Magneton 42, Machoke 42, Kadabra 36)
+LEVEL_METHODS = (EVO_LEVEL, EVO_LEVEL_ALT)  # the methods the planner projects; item, trade and friendship rows stay put
 NUM_NATURES = 25
 NATURE_NAMES = ("Hardy", "Lonely", "Brave", "Adamant", "Naughty", "Bold", "Docile", "Relaxed", "Impish", "Lax",
                 "Timid", "Hasty", "Serious", "Jolly", "Naive", "Modest", "Mild", "Quiet", "Bashful", "Rash",
@@ -258,12 +260,12 @@ def evolutions(species_id: int) -> tuple:
 
 
 def species_at_level(species_id: int, level: int) -> int:
-    """The species a mon of `species_id` holds once raised to `level` through every EVO_LEVEL step at or
-    under it, the stage the game evolves a leader's row to. A species w/ two level rows (a Wurmple split)
-    takes the first."""
+    """The species a mon of `species_id` holds once raised to `level` through every EVO_LEVEL or
+    EVO_LEVEL_ALT step at or under it, the stage the game evolves a leader's row to. A species w/ two
+    level rows (a Wurmple split) takes the first."""
     seen = {species_id}
     while True:
-        step = next((t for m, p, t in evolutions(species_id) if m == EVO_LEVEL and p <= level), None)
+        step = next((t for m, p, t in evolutions(species_id) if m in LEVEL_METHODS and p <= level), None)
         if step is None or step in seen:
             return species_id
         seen.add(step)
