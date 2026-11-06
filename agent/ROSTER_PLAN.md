@@ -56,12 +56,53 @@ for Flygon (hidden grass only); Camerupt for Houndoom (Spe 116); Starmie for Gya
 6. The current save keeps its six to the end; the roster applies from the next 0-badge start
    (`states/fixtures/route101.ss`).
 
-## Money, points and items
+## Economy heuristic for a fresh run
 
-Read off the live save: 320658 money, 893 BP, 116 trainer skill points unspent, stat-boost skills
-maxed (30 IVs in every stat), and all six at 510 EVs in grind-random spreads, Golduck w/ 202 Atk and
-22 Spe EVs on a SpA attacker, Greedent w/ 200 Spe on a wall. ROM prices via `rowe_rom.item_price`;
-counters via the guide db (`t_frequently_asked_questions`, `t_trainer_skills`, `t_new_abilitiesitems`).
+A 0-badge start holds the starting purse, 0 BP, and the skill points its trainer level grants, w/
+every mon at 0 IVs until the stat boosts are bought. The rules below key on balances as they accrue,
+never on a fixed amount. The live save that motivated them (320658 money, 893 BP, 116 skill points
+unspent, 30 IVs, all six at 510 EVs in grind-random spreads, Golduck w/ 202 Atk and 22 Spe on a SpA
+attacker) shows what a run without them ends up holding. ROM prices via `rowe_rom.item_price`; counters
+via the guide db (`t_frequently_asked_questions`, `t_trainer_skills`, `t_new_abilitiesitems`).
+
+### Skill points, in priority order
+
+1. The six stat boosts to their cap, Speed and the larger attacking stat first, then HP and the
+   defences (the spender buys round-robin today, which puts Def and SpD ahead of the second Spe point).
+2. EVs Changes to its cap, the EV editor's ceiling, so each member's spread is set at its evolution.
+3. XP Boost - Pokémon, levels are the long pole on every leg.
+4. Gold Rush, then Bargain (1% off per level), both pay for the held items below.
+5. Max PP Boost, Sniper Ball, Loot Boost, in that order, w/ whatever is left.
+
+Only the stat boosts have a stored cost, 3 points a level (`rowe_symbols.SKILL_STAT_COST`). No skill
+cost table exists on disk (no ROWE source checkout, the guide tab carries descriptions only), so
+`spend_skill_points` learns the other costs from the point delta on each buy and logs them.
+
+### Money and BP, by balance
+
+| Balance | Buy |
+|---|---|
+| money under 1000 | nothing, the reserve |
+| money over 5000 w/ a roster line as the catch target | Ultra Balls (600) over Poké Balls; the thrower picks the strongest ball held |
+| money over 20000 w/ a roster pre-evolution 10+ levels from its row | Exiolite (4500) so it fights at its final form's base stats |
+| money over 60000, before Ever Grande | one held item per member by role, Life Orb 9000, Choice Scarf / Band / Specs 10000, Focus Sash 5000, Leftovers 2000, Expert Belt 2000, Assault Vest 10000 |
+| BP over 10 per caught roster line | a Nature Mint at Oldale's Battle Mart, 10 BP |
+| BP left after the mints | Ability Capsule, then Patch, Oldale's Battle Mart |
+
+Natures: Timid Gardevoir, Manectric, Houndoom; Jolly Gyarados, Lucario, Flygon. Abilities: Moxie
+Gyarados, Lightning Rod Manectric, Flash Fire Houndoom, Justified Lucario. HP restores and cures keep
+their existing floors. Vitamins (900) only matter under 510 EVs, and a spread set through the EV
+editor makes them moot.
+
+### Loot and menus
+
+Visible item balls on the current map are already picked up every tick (`collect_step`) outside a
+heal, a Mart trip, a scene, the League leg and a boss room. Not driven yet: an item ball on another
+map as a planner goal (TM26 Earthquake in Seafloor Cavern), hidden items through the Dowsing Machine,
+hidden-grass encounters through the Shaking Tool. Menu cursors take the short way round since
+`Errands.menu_step`; the start menu and the skills list no longer lap DOWN to reach a row one above.
+
+### Levers, by item
 
 | Lever | Cost | Where | What it buys the roster |
 |---|---|---|---|
@@ -75,13 +116,8 @@ counters via the guide db (`t_frequently_asked_questions`, `t_trainer_skills`, `
 | Power items | 5000 | Lilycove Dept Store, Eight Island Battle Mart | 20 EVs per KO while held, the fallback when the EV editor is not driven |
 | Vitamins | 900 | Mart | moot at 510 EVs; a reassigned spread goes through the EV editor |
 
-Order for the next run. Ultra Balls from the first Mart visit once money passes 5000. Skill points into
-the six stat boosts first (already the rule), then EVs Changes to its cap, then XP Boost and Bargain.
-EV spreads set at each evolution, speed and the larger attacking stat. Mints and capsules bought w/ BP
-at Oldale as the lines are caught, held items bought before Ever Grande, the mega stone given at 11
-badges.
-
 Executor pieces, none started. `catch_plan` and `throw_ball` choose the strongest ball held
-(`catch_chance` takes a ball multiplier no caller passes); `shopping_list` adds Ultra Balls;
-`spend_skill_points` buys past the stat boosts; a BP counter errand at Oldale; a give-item errand from
-the bag; the summary-screen EV editor; a use-item errand for mints and capsules.
+(`catch_chance` takes a ball multiplier no caller passes); `shopping_list` adds Ultra Balls and the
+held items by balance; `spend_skill_points` buys in the priority order above and logs each skill's
+cost; a BP counter errand at Oldale; a give-item errand from the bag; the summary-screen EV editor; a
+use-item errand for mints and capsules; an item-ball planner goal for a named TM on another map.

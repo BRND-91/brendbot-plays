@@ -20,6 +20,7 @@ from nav import DIRS, GATE_SETTLE_FRAMES, ITEM_WATERFALL_TOOL, THIN_ICE, Grid, N
 ROUTE_101 = (0, 16)
 OLDALE = (0, 10)
 NURSE_LOCAL_ID = 1
+START_MENU_ROWS = 12         # Pokédex through Exit on ROWE's start menu; the cursor wraps at both ends
 MENU_ROW_POLLS = 6           # reads of the sailor's row list after the field locks before it is called empty
 MENU_ROW_POLL_FRAMES = 15
 MART_COUNTER_TILE = (3, 3)   # right of the counter end at (2,3), facing the clerk at (1,3) through
@@ -1371,17 +1372,7 @@ class Errands:
             self.run(20, 0)
         self.tap(eb.KEY_START)
         self.run(90, 0)
-        # the cursor byte keeps its last value until the menu has drawn, so a read taken too early
-        # says Pokémon while the menu opens on Pokédex; the row is re-read after a settle and
-        # only a repeat reading lets A fire (the live run opened the Pokédex and left)
-        for _ in range(8):
-            if self.e.read(S.addr("sStartMenuCursorPos"))[0] == S.START_MENU_POKEMON:
-                self.run(20, 0)
-                if self.e.read(S.addr("sStartMenuCursorPos"))[0] == S.START_MENU_POKEMON:
-                    break
-            self.tap(eb.KEY_DOWN)
-            self.run(15, 0)
-        else:
+        if not self._start_menu_to(S.START_MENU_POKEMON):
             self.log("lead_with: start menu cursor never settled on Pokémon")
             return False
         self.tap(eb.KEY_A)
@@ -1426,15 +1417,7 @@ class Errands:
             self.run(20, 0)
         self.tap(eb.KEY_START)
         self.run(60, 0)
-        opened = False
-        # the start menu keeps its cursor between opens and DOWN wraps past the last of its
-        # twelve rows, so a full lap always passes the Trainer Skills row
-        for _ in range(12):
-            if self.e.read(S.addr("sStartMenuCursorPos"))[0] == S.START_MENU_SKILLS:
-                opened = True
-                break
-            self.tap(eb.KEY_DOWN)
-            self.run(15, 0)
+        opened = self._start_menu_to(S.START_MENU_SKILLS)
         pts = start = 0
         if opened:
             self.tap(eb.KEY_A)
@@ -1449,8 +1432,9 @@ class Errands:
                 for target in S.SKILL_ROW_STAT_BOOSTS:
                     if pts < S.SKILL_STAT_COST:
                         break
-                    for _ in range((target - row) % S.SKILL_ROWS):
-                        self.tap(eb.KEY_DOWN)
+                    key, taps = self.menu_step(row, target, S.SKILL_ROWS)
+                    for _ in range(taps):
+                        self.tap(key)
                     row = target
                     self.run(20, 0)
                     self.tap(eb.KEY_A)
@@ -1467,6 +1451,31 @@ class Errands:
                 break
         self.log(f"skills: spent {start - pts} points on stat boosts, {pts} left, overworld {self.g.callback2() == cb_field}")
         return start - pts
+
+    @staticmethod
+    def menu_step(cur: int, target: int, rows: int) -> tuple:
+        """(key, taps) carrying a cursor from cur to target the short way round a list of rows that
+        wraps at both ends, so a row one above never costs a lap of DOWN."""
+        down = (target - cur) % rows
+        up = (cur - target) % rows
+        return (eb.KEY_UP, up) if up < down else (eb.KEY_DOWN, down)
+
+    def _start_menu_to(self, target: int) -> bool:
+        """Carry the start menu cursor onto target, re-reading after every tap. The cursor byte keeps
+        its last value until the menu has drawn, so a read on target counts only when a second read
+        after a settle agrees (the live run once opened the Pokédex off a stale Pokémon reading).
+        The menu keeps its cursor between opens and wraps at both ends."""
+        for _ in range(START_MENU_ROWS):
+            cur = self.e.read(S.addr("sStartMenuCursorPos"))[0]
+            if cur == target:
+                self.run(20, 0)
+                if self.e.read(S.addr("sStartMenuCursorPos"))[0] == target:
+                    return True
+                continue
+            key, _taps = self.menu_step(cur, target, START_MENU_ROWS)
+            self.tap(key)
+            self.run(15, 0)
+        return False
 
     def _menu_cursor_to(self, row: int) -> bool:
         """Move the nurse's multichoice cursor onto row."""
@@ -1591,11 +1600,7 @@ class Errands:
             self.run(20, 0)
         self.tap(eb.KEY_START)
         self.run(60, 0)
-        for _ in range(8):
-            if self.e.read(S.addr("sStartMenuCursorPos"))[0] == S.START_MENU_BAG:
-                break
-            self.tap(eb.KEY_DOWN)
-            self.run(15, 0)
+        self._start_menu_to(S.START_MENU_BAG)
         self.tap(eb.KEY_A)
         self.run(120, 0)
         if self.g.callback2() == S.CB2_BAG_MAIN:
@@ -1648,11 +1653,7 @@ class Errands:
             self.run(20, 0)
         self.tap(eb.KEY_START)
         self.run(60, 0)
-        for _ in range(8):
-            if self.e.read(S.addr("sStartMenuCursorPos"))[0] == S.START_MENU_BAG:
-                break
-            self.tap(eb.KEY_DOWN)
-            self.run(15, 0)
+        self._start_menu_to(S.START_MENU_BAG)
         self.tap(eb.KEY_A)
         self.run(120, 0)
         opened = self.g.callback2() == S.CB2_BAG_MAIN
