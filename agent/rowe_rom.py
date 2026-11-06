@@ -1044,6 +1044,19 @@ def leader_build(name: str, badges: int) -> list:
     return [(species_at_level(sp, lvl), lvl) for sp, lvl in leader_team(name, badges)]
 
 
+# the post-game bosses in planner.POSTGAME order, one gTrainers struct of six L100 rows each
+BOSSES = ["Steven", "Red"]
+
+
+def boss_build(name: str) -> list:
+    """[(species, level)] a post-game boss fields: the rows as stored, final forms already, w/ the
+    level byte at +0 of each, so the scorers see the L100 six instead of a leader-ladder level."""
+    pool = trainer_pool(name)
+    rom = _rom()
+    po = _fo(struct.unpack_from("<I", rom, trainer_struct(name) + TRAINER_PARTY_OFF)[0])
+    return [(sp, rom[po + j * TRAINER_ROW_SIZE]) for j, sp in enumerate(pool)]
+
+
 # the 8 Sevii-island leaders giving badges 9-16 (flags rowe_symbols.JOHTO_BADGE01 onward); their
 # gTrainers structs run contiguously from Falkner's at TRAINER_STRUCT_SIZE steps, in this order
 SEVII_LEADERS = ["Falkner", "Bugsy", "Whitney", "Morty", "Chuck", "Jasmine", "Pryce", "Clair"]

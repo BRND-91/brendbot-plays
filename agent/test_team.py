@@ -49,7 +49,7 @@ class G:
         return self._badges
 
     def flag(self, flag_id: int) -> bool:
-        return flag_id - S.FLAG_BADGE01 < self._badges
+        return S.FLAG_BADGE01 <= flag_id < S.FLAG_BADGE01 + self._badges
 
     def iv_boosts(self) -> tuple:
         return NO_IVS

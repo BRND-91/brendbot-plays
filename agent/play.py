@@ -2031,12 +2031,17 @@ class Player:
 
     def scoring_builds(self) -> tuple:
         """(core builds, next leader's build or None): every remaining leader at the badge count it will
-        be fought at in ladder order, then the League at LEAGUE_BADGES, each as foe type pairs."""
+        be fought at in ladder order, then the League at LEAGUE_BADGES, each as foe type pairs. Past
+        the game clear the unbeaten post-game bosses replace them, since the League is done and
+        Steven's L100 six is what the TM, catch and swap scorers have to aim at."""
         badges = self.g.badges()
         left = self.unbeaten_leaders()
         core = [foe_types(rowe_rom.leader_build(rowe_rom.LEADERS[k], min(badges + i, rowe_rom.LEAGUE_BADGES)))
                 for i, k in enumerate(left)]
         core += [foe_types(rowe_rom.leader_build(n, rowe_rom.LEAGUE_BADGES)) for n in rowe_rom.LEAGUE]
+        if self.g.flag(S.FLAG_SYS_GAME_CLEAR):
+            bosses = [n for n, m in zip(rowe_rom.BOSSES, planner.POSTGAME) if not self.g.flag(BOSSES[m][0])]
+            core = [foe_types(rowe_rom.boss_build(n)) for n in bosses] or core
         nxt = foe_types(rowe_rom.leader_build(rowe_rom.LEADERS[left[0]], badges)) if left else None
         return core, nxt
 
