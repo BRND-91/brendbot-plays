@@ -30,7 +30,8 @@ while [ $((end - SECONDS)) -gt 120 ]; do
     # WATCH_FLAT samples is bouncing a phantom route (the Seagallop chain into a ticket-locked island
     # reads as routable), which no exit-time check can catch because play.py never exits. TERM it at a
     # save point so the relaunch's planner.py --apply re-decides the goal. A grind holds one grass
-    # patch, so a flat map count there is normal and never trips this.
+    # patch, so a flat map count there is normal and never trips this, and neither does standing on
+    # the goal map: a boss fight of six L100s there runs past 15 flat minutes and is the progress.
     flat=0; pv=-1; pb=-1; spun=0
     while kill -0 "$child" 2>/dev/null; do
         sleep "$WATCH_INTERVAL"
@@ -39,10 +40,10 @@ while [ $((end - SECONDS)) -gt 120 ]; do
 g=json.load(open('states/map_graph.json')) if os.path.exists('states/map_graph.json') else {}; \
 s=json.load(open('states/status.json')) if os.path.exists('states/status.json') else {}; \
 go=json.load(open('states/goal.json')) if os.path.exists('states/goal.json') else {}; \
-print(len(g.get('visited',[])), s.get('badges',0), go.get('mode','?'))" 2>/dev/null)
+print(len(g.get('visited',[])), s.get('badges',0), go.get('mode','?'), int(s.get('map') == go.get('to')))" 2>/dev/null)
         [ -z "$prog" ] && continue
-        read -r v b m <<<"$prog"
-        if [ "$m" = grind ] || [ "$m" = done ] || [ "$m" = "?" ]; then flat=0
+        read -r v b m at <<<"$prog"
+        if [ "$m" = grind ] || [ "$m" = done ] || [ "$m" = "?" ] || [ "$at" = 1 ]; then flat=0
         elif [ "$v" = "$pv" ] && [ "$b" = "$pb" ]; then flat=$((flat + 1)); else flat=0; fi
         pv=$v; pb=$b
         if [ "$flat" -ge "$WATCH_FLAT" ]; then
