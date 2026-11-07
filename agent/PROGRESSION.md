@@ -209,6 +209,76 @@ any grind; the only progress at cap is a badge.
    eight badges w/ two mons alternating as best yields at most one core swap each and never
    the reverse of the last one; an Ice TM in the bag lands on the core member w/ the higher
    SpA when no core attack hits Dragon.
+9. Boss retry priced against the grind. Scope, five pieces. Today `recommend` is a ladder
+   (planner.py:361-417): an open boss w/ a route wins outright, the only cost proxy is
+   BOSS_LOSS_CAP=2, and the hold grinds the strongest grass, which changes nothing at L100.
+   The sunk cost is the six that already lost; every retry pays the walk back from the
+   Center to Meteor Falls plus the whiteout's money (status.json money 95048 -> 90048 across
+   one loss), and the grind that would fix it is cheap: post-clear wilds spawn at
+   Normal_Mode_Min_Wild_Pokemon_Level[9]=60 plus a 0-18 boost (level_scaling.c:87, :163,
+   :204), the bag holds the Exp Charm (+50 on the 100 base, battle_script_commands.c:3834,
+   :3996) and the Gen 6 Exp Share toggle is on (SaveBlock2 options bit 13), so a fire or
+   ground catch arrives mid-60s and trains on L70 grass, never from L5.
+   a. Retry cost ledger. boss_losses.json gains per-attempt rows: fight-start ts (boss_step
+      on "battle"), whiteout ts, money before and after, and the ts of the next boss fight
+      start, so retry cost is the measured whiteout-to-rematch span, not a guess. `say`
+      lines in grind.log carry a UTC timestamp, since today only the `=== run` headers do
+      and nothing in the log can time a retry.
+   b. Cost rule in place of the fixed cap. boss_cost = losses_under_signature x
+      measured_retry_minutes (the median whiteout-to-rematch span on the ledger; zero
+      losses sends the party in); grind_cost = hops to the coverage map x measured hop
+      minutes (median seconds per field map change) + CATCH_MINUTES + train-to-floor
+      minutes, exp integrated over `rowe_rom.exp_bounds` from the L60 wild floor to the
+      party floor at the lead's measured exp per minute (a flat per-level rate read at L65
+      undercounts the 65-100 climb by 38% on the medium-fast table). Boss while
+      boss_cost <= grind_cost, grind otherwise; the coverage grind ends when the catch
+      record grows (check_goal's coverage exit) and the swap resets the losses. The hold
+      sits in `planner.recommend` off boss_losses.json; `note_boss_loss` only tallies and
+      BOSS_LOSS_CAP, boss_closed.json and still_closed_bosses go. Measurements persist:
+      play.py saves the lead-exp and hop samples to states/pace.json on every status write
+      and loads them at launch beside stuck_hits.json, so a relaunch prices w/ the last
+      run's figures and the named defaults (RETRY 20, HOP 2, EXP 2000) govern only a run
+      w/ nothing measured yet; the reason line names each default it priced w/.
+   c. Wanted types ranked against the open boss's six. `wanted_catch_types` already aims
+      at `boss_build` past the game clear (play.py:2098-2100), but the 14-type want list is
+      flat, so `coverage_map` picks the nearest grass w/ any of them. Rank each type by
+      the count of the open boss's six it hits super-effectively through
+      `rowe_rom.effectiveness` (Steven: Magnezone, Excadrill, Dracovish, Aegislash,
+      Diancie, Metagross; four Steels, so Ground and Fire lead), and `coverage_map` takes
+      the ranked list, nearest grass carrying the top-ranked uncaught type first, next
+      rank only when no walked map holds one.
+   d. Newcomer training at postgame. CAPS[-1]=45 at 16 badges (planner.py:30, :365), so
+      `low < cap` never fires past the clear and a L65 catch marches to Steven at L65;
+      Aurorus L79 and Galvantula L78 sit in the live party today under that cap and never
+      grind. Past the clear the cap is the party's top level (100 here). `best_swap`'s
+      LEVEL_CUTOFF (play.py:653) skips a box mon more than 10 under the party mon it
+      replaces, so a L65 catch can never enter an L100 party. A wanted-type box mon past
+      the clear at or above the L60 wild floor (POSTGAME_WILD_FLOOR) is exempt from the
+      cutoff and from the per-level penalty and needs CORE_MARGIN_FLOOR instead of the
+      share margin: a L65 Donphan into the L100 six scores +11 to +15 against a margin of
+      18, and the penalty would take it to -20, so the penalty-paying version never fires;
+      the grind to the party's cap recovers the levels. The L60 floor keeps a L5 box mon
+      of a wanted type out.
+   e. Tests. test_boss_loss: two losses at a 2-minute retry against a 39-minute grind keep
+      the boss open, five at 10 minutes flip it (five at 2 is 10 <= 39 and does not), a
+      signature change zeroes the count, a cold ledger prices and names the retry default,
+      the retry is the median span, and pace.json round-trips the exp and hop samples. The
+      catch exit lives in test_coverage_grind, which also checks ranked wants pick Ground
+      grass two hops out over Bug grass underfoot and that a boss w/ no coverage grass
+      left is fought whatever the losses. test_team: the postgame cap is the party top,
+      a L65 Ground catch swaps into the L100 party past the clear, a L5 Dark box mon and
+      a pre-clear party do not. Live-copy smoke under /tmp from the newest ring snapshot
+      before the relaunch.
+   Files: planner.py (boss_losses, grind_cost, rank_wanted, ranked coverage_map, postgame
+   cap, the hold decision in recommend), play.py (attempt ledger, timestamped say,
+   note_boss_loss tally only, best_swap exempt set, exp_per_min and hop_sec measurements,
+   pace.json), test_boss_loss.py, test_coverage_grind.py, test_team.py.
+   Check: off the live status the planner reports the cost pair in its reason line; w/
+   the defaults it prices the boss cheaper (3 losses x 20 = 60 vs 5 hops x 2 + 15 + 178
+   train = 203) and sends the L83 members to the cap-100 grind first, and w/ the measured
+   exp rate (about 14k/min at 1x off the smoke) the train term drops to about 22 and the
+   grind toward Ground grass wins at 3 losses. After the catch the party reaches Steven w/
+   a Ground attacker at the party's top level.
 
 ## Cross-cutting
 

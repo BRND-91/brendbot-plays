@@ -47,6 +47,24 @@ def catch_chance(foe: BattleMon, ball_mult: float = 1.0) -> float:
     return (shake / 65536) ** 4
 
 
+def strongest_ball(balls: dict) -> tuple:
+    """(item id, catch multiplier) of the strongest ball tier in the pocket, (POKE_BALL, 1.0) when
+    none of the tiers are held. `balls` is {item id: qty} off the Poké Balls pocket; BALL_TIERS runs
+    weakest-first, so the reversed walk takes Ultra over Great over Poké."""
+    sets = R.item_sets()
+    for iid in reversed(sets["BALL_TIERS"]):
+        if balls.get(iid, 0) > 0:
+            return iid, sets["BALL_MULT"][iid]
+    return POKE_BALL, 1.0
+
+
+def ball_count(balls: dict) -> int:
+    """Throwable balls summed across the tiers, so the catch count sees Great and Ultra Balls a
+    Poké-Ball-only read missed."""
+    tiers = R.item_sets()["BALL_TIERS"]
+    return sum(qty for iid, qty in balls.items() if iid in tiers)
+
+
 def status_move_slot(user: BattleMon, foe: BattleMon) -> int | None:
     """Slot of a usable status-inflicting move the foe's types do not shrug off, when the foe
     carries no status yet."""
@@ -84,12 +102,17 @@ class Ledger:
             with open(path) as f:
                 self.caught |= set(json.load(f))
 
-    def wants(self, foe: BattleMon, wanted: frozenset = frozenset(), balls: int = BALL_RESERVE + 1) -> bool:
+    def wants(self, foe: BattleMon, wanted: frozenset = frozenset(), balls: int = BALL_RESERVE + 1,
+              species: int | None = None) -> bool:
         """A species not caught yet; once the bag is down to BALL_RESERVE balls, only one carrying a type
-        in `wanted`, the types no core attack hits super effectively."""
+        in `wanted`, the types no core attack hits super effectively, or the one `species` the grind
+        goal went out for, which the reserve is for. The goal names the encounter table's row and the
+        post-clear scaling fields that row at its evolved stage, Teddiursa's slot as a L52 Ursaluna, so
+        the form the row takes at the foe's level counts as the goal species."""
         if foe.species in self.caught:
             return False
-        return balls > BALL_RESERVE or bool(set(foe.types) & wanted)
+        goal_form = species is not None and foe.species in (species, R.species_at_level(species, foe.level))
+        return goal_form or balls > BALL_RESERVE or bool(set(foe.types) & wanted)
 
     def record(self, species: int) -> None:
         self.caught.add(species)

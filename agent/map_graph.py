@@ -230,6 +230,21 @@ class MapGraph:
             self.gate_reason[edge] = reason
         self.save()
 
+    def unblock(self, here: Node, neighbor: Node) -> bool:
+        """Drop the gate on here->neighbor once a crossing moved the party over it. A stuck tally
+        gates the map-level edge, so three misses from one region of Meteor Falls shut the boss
+        room while the walk later entered it from another, and the gate outlived that entry: route
+        read None, the planner fell to an explore of a map already visited. True when a gate went."""
+        edge = (here, neighbor)
+        if edge not in self.gated:
+            return False
+        del self.gated[edge]
+        self.gate_badges.pop(edge, None)
+        self.gate_version.pop(edge, None)
+        self.gate_reason.pop(edge, None)
+        self.save()
+        return True
+
     def _open(self, node: Node, blocked=frozenset(), field_moves=frozenset()) -> list:
         """Unvisited borders of node worth a crossing attempt now: not visited, not blocked
         this run, and not gated under the current field-move set."""

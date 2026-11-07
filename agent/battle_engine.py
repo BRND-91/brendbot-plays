@@ -16,11 +16,13 @@ CHARGING_EFFECTS = frozenset({75, 145, 151, 155})
 # value. Two turns per hit, so half: the charging set above plus 80 recharge (Giga Impact). Never
 # worth a pick on their power: 148 Future Sight lands two turns on and fails while one is pending,
 # 158 Fake Out first turn only, 170 Focus Punch drops when hit, 7 self-KO, 8 Dream Eater and 92 Snore
-# need a sleeper, 325 Belch an eaten berry, 305 Synchronoise a shared type, and 26/89/144/257 hit
-# back off damage taken. 286 Last Resort fails until every other move has been used this battle.
+# need a sleeper, 305 Synchronoise a shared type, and 26/89/144/257 hit back off damage taken.
+# 286 Last Resort fails until every other move has been used this battle and 325 Belch until the
+# user's berry is eaten; the caller knows both and passes them in.
 TWO_TURN_EFFECTS = CHARGING_EFFECTS | {80}
-NO_PICK_EFFECTS = frozenset({7, 8, 26, 89, 92, 144, 148, 158, 170, 257, 305, 325})
+NO_PICK_EFFECTS = frozenset({7, 8, 26, 89, 92, 144, 148, 158, 170, 257, 305})
 LAST_RESORT_EFFECT = 286
+BELCH_EFFECT = 325
 
 # abilities that take a move of the type for no damage, from the ABILITYEFFECT_ABSORBING branch of
 # battle_util.c plus Levitate; ids resolve by name because the ROM's table outruns the vendored source
@@ -49,10 +51,13 @@ class Scored:
     score: float
 
 
-def expected_damage(user: BattleMon, foe: BattleMon, mv: R.Move, used=frozenset()) -> tuple:
+def expected_damage(user: BattleMon, foe: BattleMon, mv: R.Move, used=frozenset(), berry_eaten=False) -> tuple:
     """Gen-3 base damage formula times STAB, type chart and accuracy, per turn the move costs.
-    `used` is the slots user has picked this battle, the Last Resort precondition."""
+    `used` is the slots user has picked this battle, the Last Resort precondition; `berry_eaten`
+    is Belch's."""
     if mv.split == R.SPLIT_STATUS or mv.power == 0 or mv.effect in NO_PICK_EFFECTS:
+        return 0.0, 1.0
+    if mv.effect == BELCH_EFFECT and not berry_eaten:
         return 0.0, 1.0
     if mv.effect == LAST_RESORT_EFFECT:
         others = {i for i, m in enumerate(user.moves) if m and m != mv.id}
@@ -70,13 +75,13 @@ def expected_damage(user: BattleMon, foe: BattleMon, mv: R.Move, used=frozenset(
     return base * stab * eff * acc / turns, eff
 
 
-def rank_moves(user: BattleMon, foe: BattleMon, used=frozenset()) -> list:
+def rank_moves(user: BattleMon, foe: BattleMon, used=frozenset(), berry_eaten=False) -> list:
     out = []
     for slot, (move_id, pp) in enumerate(zip(user.moves, user.pp)):
         if not move_id or not pp:
             continue
         mv = R.move(move_id)
-        dmg, eff = expected_damage(user, foe, mv, used)
+        dmg, eff = expected_damage(user, foe, mv, used, berry_eaten)
         # a status move scores under any hit that does damage, above a 0x hit
         score = dmg if dmg > 0 else (0.5 if mv.split == R.SPLIT_STATUS else 0.0)
         out.append(Scored(slot, mv, dmg, eff, score))
@@ -141,6 +146,12 @@ def edge(user: BattleMon, foes: list) -> tuple:
     return dealt, taken
 
 
+def lead_steps_out(me: BattleMon, foes: list) -> bool:
+    """Whether the exp lead hands the fight to the bench: any foe outlevels it, or outmatched. A mon
+    under the wild's level never carries its own fight; it stands on the field for the share only."""
+    return any(f.level > me.level for f in foes) or outmatched(me, foes)
+
+
 def strongest_bench(party: list, active: BattleMon, foes: list) -> tuple[int, float] | None:
     """(slot, dealt-minus-taken edge) of the bench mon best placed against foes, or None when no
     bench mon stands with a damaging move left."""
@@ -200,3 +211,42 @@ def weakening_move(user: BattleMon, foe: BattleMon) -> Scored | None:
     safe = [s for s in rank_moves(user, foe)
             if s.move.power >= 10 and s.move.effect not in CHARGING_EFFECTS and 0 < s.damage < foe.hp * 0.8]
     return max(safe, key=lambda s: s.damage) if safe else None
+
+
+BOSS_IVS = (31,) * 6  # a boss row's IV byte is 0xff, every stat at 31
+
+
+def battler_at(species: int, level: int, moves: tuple, nature: int, ivs: tuple, evs: tuple) -> BattleMon:
+    """A mon as it would stand at `level` in BattleMon shape, stats off the game's formula, every move
+    w/ PP, so the damage formula can score a box mon or a boss row that is not in a battle."""
+    st = R.stats_at(species, level, nature, ivs, evs)
+    return BattleMon(battler=-1, species=species, level=level, hp=st[R.HP], max_hp=st[R.HP],
+                     moves=tuple(moves), pp=(1,) * 4, types=R.species(species).types, ability=0, status1=0,
+                     stat_stages=(6,) * 8, nickname="", atk=st[R.ATK], dfn=st[R.DEF], spd=st[R.SPE],
+                     sp_atk=st[R.SPA], sp_def=st[R.SPD])
+
+
+def boss_foes(name: str) -> list:
+    """The boss's six as fielded, BattleMons off the trainer rows at the row level w/ the row moves."""
+    return [battler_at(sp, lvl, moves, 0, BOSS_IVS, (0,) * 6) for sp, lvl, moves in R.boss_mons(name)]
+
+
+def boss_edge(m, level: int, ivs: tuple, foes: list) -> float:
+    """Summed dealt-minus-taken edge of `m` raised to `level` against each of `foes`: its best hit as a
+    fraction of the foe's HP minus the foe's best hit as a fraction of its own, the damage formula on
+    its real moves and stats. Type presence scored a 65-power Fire Fang on a Normal mon as Steel
+    coverage; this scores what it takes off Metagross."""
+    sp = R.species_at_level(m.species, level)
+    user = battler_at(sp, level, m.moves, m.nature, ivs, m.evs)
+    return sum(d - t for d, t in (edge(user, [f]) for f in foes))
+
+
+class Prospect:
+    """An uncaught species as it would stand once caught and raised: the form at `level` w/ the last
+    four damaging level-up moves it learns by then, neutral nature, no EVs. What boss_edge scores when
+    the planner asks whether a catch would beat the party's weakest member."""
+
+    def __init__(self, species: int, level: int):
+        final = R.species_at_level(species, level)
+        damaging = [mv for lv, mv in R.level_up_learnset(final) if lv <= level and 0 < mv < R.MOVE_COUNT and R.move(mv).power > 0]
+        self.species, self.moves, self.nature, self.evs = species, tuple(damaging[-4:]), 0, (0,) * 6

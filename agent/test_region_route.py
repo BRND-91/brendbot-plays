@@ -78,3 +78,17 @@ def test_landing_rank_chain_demotes_the_ladder_into_the_dead_half():
     two, _, _ = landing_rank(VR1F, CITY, surf=False, chain=(LEAGUE,))
     assert two((9, 14))[0] == 1, two((9, 14))
     assert two((21, 32))[0] == 0, two((21, 32))
+
+
+def test_shared_border_portals_split_by_connection_offset():
+    """(1,62)'s west edge meets (1,85) at offset 0, (1,58) at 40 and (1,65) at 80. Each edge portal
+    holds only the border tiles whose shifted y lands inside its neighbour, so a route to (1,58)
+    never aims at a tile that steps into (1,85)."""
+    edges = {p.dest: p for p in region_route.portals((1, 62)) if p.kind == "edge"}
+    assert set(edges) == {(1, 85), (1, 58), (1, 65)}, sorted(edges)
+    for dest, lo, hi in (((1, 85), 0, 20), ((1, 58), 40, 70), ((1, 65), 80, 100)):
+        ys = {y for _x, y in edges[dest].landings}
+        assert ys and ys <= set(range(lo, hi)), (dest, sorted(ys))
+    assert (0, 5) not in edges[(1, 58)].landings and (0, 5) in edges[(1, 85)].landings
+    assert (0, 48) in edges[(1, 58)].landings
+    assert all(0 <= ly < 30 for _lx, ly in edges[(1, 58)].landings.values())

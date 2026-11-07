@@ -68,7 +68,7 @@ def main() -> None:
         print(f"{cy:3} " + " ".join(cs(cx, cy) for cx in range(BALL[0] - 7, BALL[0] + 8)), flush=True)
     print("item balls:", rowe_map.item_balls(e), flush=True)
     surf = "SURF" in player.field_moves()
-    print("collectable:", player.collectable_balls(), "surf", surf, flush=True)
+    print("collectable:", player.collectable_items(), "surf", surf, flush=True)
     print("stand tiles:", Errands.stand_tiles(grid, BALL, (x, y), surf), flush=True)
     elev = grid.cell(x, y) >> S.GRID_ELEVATION_SHIFT
     reach = grid.reachable((x, y), surf)

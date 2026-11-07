@@ -14,7 +14,7 @@ def _player() -> Player:
     p.graph = None
     p._blocked_streak = {}
     p.field_moves = lambda: frozenset({"SURF"})
-    p._landing_rank = lambda hop, nxt, surf: None
+    p._landing_rank = lambda hop, nxt, surf, chain=(): None
     p.run = lambda frames, keys=0: None
 
     class G:
@@ -24,7 +24,7 @@ def _player() -> Player:
 
     class Errands:
         @staticmethod
-        def cross_edge(direction, surf=False, rank=None, tools=frozenset()):
+        def cross_edge(direction, surf=False, rank=None, tools=frozenset(), span=None):
             return "unreachable"
 
     p.g, p.errands = G(), Errands()

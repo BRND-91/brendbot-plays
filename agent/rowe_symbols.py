@@ -84,6 +84,8 @@ SKILL_ROWS = 25
 SKILL_STAT_COST = 3
 SKILL_IV_PER_LEVEL = 3
 CB2_BAG_MAIN = 0x82054F1  # gMain.callback2 on the bag item list, the field and battle bag share it
+CB2_START_MENU = 0x8247BF9  # gMain.callback2 w/ the field Start menu open (start_menu_open.ss, off the live run)
+CB2_START_MENU_PAGE = 0x8246AA9  # the screen A opened from the Start menu row the live run sat on; B backs out
 PARTY_ACTION_SWITCH = 1  # mon submenu rows: Summary, Switch, Item, Cancel
 
 # struct BagPosition: exitCallback*, u8 location, u8 pocket, u16 cursorPosition[]
@@ -135,11 +137,12 @@ SIZEOF_BOX_POKEMON = 0x34      # measured stride between filled box slots; the p
                                # 0x34 bytes without the party-only status/level/hp/stats tail
 SIZEOF_BATTLE_POKEMON = 0x60   # gBattlerSpriteIds - gBattleMons == 4 * 0x60
 PARTY_SIZE = 6
-# struct PokemonStorage at *gPokemonStoragePtr: u32 currentBox, then boxes[14][30] of BoxPokemon.
+# struct PokemonStorage at *gPokemonStoragePtr: u32 currentBox, then boxes[21][30] of BoxPokemon.
 # The mon grid begins past the currentBox word; a box slot is contiguous from 0 across all boxes.
 PC_CURRENT_BOX = 0x0  # steps 0 -> 1 -> 2 as RIGHT turns pages from the withdraw grid's title row
 PC_BOXES = 0x4
-PC_BOX_COUNT = 14
+PC_BOX_COUNT = 21  # the box-name table Box1..Box21 sits at PC_BOXES + 21 * 30 * SIZEOF_BOX_POKEMON in every
+# save from the Route 101 fixture (7 boxed) to the live one (96 boxed), so the count is the ROM's, fixed from the start
 PC_IN_BOX = 30
 
 # box storage PC UI, probed on the Center's storage terminal (not the ROWE service PC).
@@ -232,6 +235,7 @@ SB1_BAG_POKE_BALLS = 0x6D8
 BAG_POKE_BALLS_SLOTS = 32
 BAG_KEY_ITEMS_SLOTS = 30
 BAG_MEDICINE_SLOTS = 40
+BAG_ITEMS_SLOTS = 80    # cap 80, read off gBagPockets[0].capacity in a live save
 # gBagPockets, {u8 *itemSlots; u8 capacity} rows, found by scanning EWRAM for the Items pocket
 # pointer; row 8 is the TMs & HMs tab and points into EWRAM, not the save block, which is why a
 # save-block scan shows no TM rows
@@ -239,6 +243,7 @@ BAG_POCKETS = 0x0203AD70
 TM_POCKET = 0x0203ADC4      # gBagPockets[8].itemSlots, quantity ^ (encryptionKey & 0xFFFF) like the rest
 TM_POCKET_SLOTS = 208
 BAG_POCKET_TMS = 8
+BAG_POCKET_ITEMS = 0    # the Items tab, where sellable loot, fossils and repels sit
 BAG_POCKET_COUNT = 10  # RIGHT from tab 2 on the field bag cycles 3..9 then 0, 1, 2 (center_entry.ss probe)
 # gBagPosition.scrollPosition[pocket], the u16 array after cursorPosition[BAG_POCKET_COUNT]; the list
 # shows five rows, so the cursor stops at 4 and DOWN past it moves this instead (vr_16_13.ss probe)
@@ -249,6 +254,8 @@ CB2_MOVE_SELECT = 0x821EDBD
 # where the forced switch after a faint sat on the fainted mon; the field bag's "Teach which
 # Pokémon?" menu shares the steady value
 CB2_PARTY_MENU = frozenset({0x820B7BD, 0x820B78D})
+# every off-field screen B backs out of; cutscene_step presses A through anything else
+MENU_CB2 = frozenset({CB2_START_MENU, CB2_START_MENU_PAGE, CB2_BAG_MAIN}) | CB2_PARTY_MENU
 # the blue nurse (Jack) on the shared Center layout, local id 6 behind the left counter; the player
 # talks from two tiles below. sMenu.cursorPos for his multichoice menus, found by diffing IWRAM
 # across DOWN presses; it holds the previous menu's row until the next menu initialises
@@ -328,10 +335,12 @@ SB1_SKILL_POINTS = 0x1C88  # u16, the only byte stepping 80 -> 77 -> 74 across t
 # game-stats block after the 0x100 slots is populated. SB1_SKILL_POINTS sits inside it as var 0x405F.
 SB1_VARS = 0x1BCA
 VAR_NUM_BADGES = 0x4061  # written by the badge-reward ladder (ROM 0x2f388c..) and read by the nurse's tutor gates
+VAR_REPEL_STEP_COUNT = 0x4021  # steps left on the active repel, 0 when none; a Repel sets 100, counting down per step
 FLAG_RECEIVED_BADGE01 = 0xE25  # +n for the nth badge reward handed over, set beside the setvar above
 FLAG_BADGE01 = 0xCD7  # system flags start at 0xCD0 here (vanilla 0x860), badge 1 is +7 in both
 BADGE_COUNT = 8
 FLAG_SYS_GAME_CLEAR = 0xCD4  # SYSTEM_FLAGS+0x4, set natively by the Hall of Fame; the game-cleared bit
+FLAG_HIDDEN_ITEMS_START = 0x1F4  # a BgEvent's 12-bit hidden-item flagId is an offset from here, flags.h
 FLAG_DEFEATED_ELITE_4 = (0x4FB, 0x4FC, 0x4FD, 0x4FE)  # Sidney, Phoebe, Glacia, Drake, each set by its room script on the win
 FLAG_DEFEATED_METEOR_FALLS_STEVEN = 0x4F8  # Steven in his Meteor Falls cave (24,107), whose door opens on the game-clear bit
 FLAG_DEFEATED_RED = 0xDCC  # Red in Shoal Cave's high-tide inner room (24,51); DAILY_FLAGS_START 0xD90 + 0x3C

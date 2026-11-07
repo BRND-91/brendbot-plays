@@ -50,6 +50,21 @@ def test_an_egg_move_closes_a_gap_within_the_bp_budget():
     assert egg_assignments(mons, NO_IVS, 3, DRAGON_BUILD) == [], "under one move's BP nothing is bought"
 
 
+def test_a_move_of_a_type_the_member_already_attacks_with_is_not_taught():
+    """Pawmot w/ Close Combat gets no Mach Punch from the nurse whatever gap Fighting hits, and no
+    Rock Tomb from the bag while it holds Rock Tomb; the same Pawmot w/o a Fighting move does take
+    Mach Punch over Rock Tomb. The pair otherwise traded the two moves back and forth every visit."""
+    from play import egg_assignments, foe_types
+    PAWMOT, SUPERCELL_SLAM, DISCHARGE, CLOSE_COMBAT, ROCK_TOMB, MACH_PUNCH, TM39 = 923, 811, 435, 370, 317, 183, 520
+    steven = [foe_types(rowe_rom.boss_build("Steven"))]
+    pawmot = Mon(5, PAWMOT, 100, [SUPERCELL_SLAM, DISCHARGE, CLOSE_COMBAT, ROCK_TOMB])
+    mons = [Mon(i, GREEDENT, 100, [TACKLE]) for i in range(5)] + [pawmot]
+    assert all(mv != MACH_PUNCH for _, _, mv in egg_assignments(mons, NO_IVS, 800, steven)), "Fighting is already on Pawmot"
+    assert all(i != 5 for _, i, _, _ in tm_assignments(mons, NO_IVS, [(TM39, 1)], steven)), "Rock is already on Pawmot"
+    bare = [Mon(i, GREEDENT, 100, [TACKLE]) for i in range(5)] + [Mon(5, PAWMOT, 100, [SUPERCELL_SLAM, DISCHARGE, ROCK_TOMB])]
+    assert (5, 2, MACH_PUNCH) in egg_assignments(bare, NO_IVS, 800, steven), "the control: w/o a Fighting move Mach Punch is taught over Rock Tomb"
+
+
 def party() -> list:
     mons = [Mon(i, GREEDENT, 41, [TACKLE]) for i in range(4)] + [Mon(4, LAPRAS, 41, [WATER_GUN]), Mon(5, LAPRAS, 41, [WATER_GUN])]
     mons[4].nature, mons[5].nature = ADAMANT, MODEST

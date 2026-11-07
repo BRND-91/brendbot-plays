@@ -72,6 +72,19 @@ def main() -> None:
     assert channel.path((0, 0), (4, 0), surf=False) is None
     assert len(channel.path((0, 0), (4, 0), surf=True)) == 4, "water is the fallback"
 
+    # the margin holds the neighbour's own cells, and a step onto one fires the map change, so a
+    # route to a tile inside the map never cuts through it: (1,58)'s landing (39,8) reached the dock
+    # only via (40,8), which is (1,62), and every walk from there "missed" onto the wrong map
+    split = _grid([".#.",
+                   ".#.",
+                   ".#."])
+    cells = list(split.cells)
+    for mx in range(3):
+        cells[(-1 + S.MAP_OFFSET) * split.width + mx + S.MAP_OFFSET] = 3 << S.GRID_ELEVATION_SHIFT
+    split.cells = tuple(cells)
+    assert split.path((0, 0), (2, 0)) is None, "a route cut through the margin row above the map"
+    assert split.path((0, 0), (0, -1)) == [(0, -1)], "a margin tile as the goal is the edge crossing itself"
+
     # a water current carries the surfer the way it flows until still water: pressing into a
     # westward current from its west bank lands the surfer back where it started, so no route
     # runs east through it (Route 134's rapids), while an eastward current is one press across

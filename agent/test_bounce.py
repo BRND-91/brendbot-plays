@@ -22,6 +22,14 @@ class _Graph:
     def block(self, here, neighbor, field_moves=frozenset(), reason=None):
         self.blocked.append((here, neighbor))
 
+    @staticmethod
+    def observe(here, neighbors):
+        return []
+
+    @staticmethod
+    def unblock(here, neighbor):
+        return False
+
 
 class _G:
     @staticmethod

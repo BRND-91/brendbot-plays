@@ -27,6 +27,7 @@ def _player(g) -> play.Player:
     p = play.Player.__new__(play.Player)
     p.g = g
     p.keys = []
+    p._used_slots = {}
 
     def tap(keys, hold=8, gap=12):
         p.keys.append(keys)
@@ -97,7 +98,7 @@ def test_selection_box_leaves_on_b_never_a():
 
 def test_parked_move_list_steers_to_pp_slot_and_confirms():
     g = _ParkedMoveG()
-    me = types.SimpleNamespace(pp=[0, 0, 10, 10])
+    me = types.SimpleNamespace(pp=[0, 0, 10, 10], personality=1)
     p = _player(g)
     p.pick_move = lambda me_, foes_: 2
     p.steer_move_cursor = lambda battler, target: setattr(g, "cursor", target)
@@ -152,6 +153,7 @@ def test_box_toggling_mid_intro_never_mashes_a_at_comm6():
     p = play.Player.__new__(play.Player)
     p.g = g
     p.presses = []
+    p._used_slots = {}
 
     def tap(keys, hold=8, gap=12):
         p.presses.append((keys, g.cur()))
@@ -164,7 +166,7 @@ def test_box_toggling_mid_intro_never_mashes_a_at_comm6():
     p._battle_pulse = lambda: 0
     p.pick_move = lambda me_, foes_: 1
     p.steer_move_cursor = lambda battler, target: setattr(g, "cursor", target)
-    me = types.SimpleNamespace(pp=[0, 10, 0, 0])
+    me = types.SimpleNamespace(pp=[0, 10, 0, 0], personality=1)
     p._advance_intro(0, me, [])
     assert (eb.KEY_A, 6) not in p.presses, "an A at comm 6 re-dismisses the no-PP box, which reopens"
     assert (eb.KEY_B, 6) in p.presses, "the box is left with B when it toggles up mid-intro"

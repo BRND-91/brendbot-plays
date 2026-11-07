@@ -51,7 +51,7 @@ def main() -> None:
         gpath = os.path.join(tmp, "map_graph.json")
         shutil.copy(os.path.join(HERE, "states", "map_graph.json"), gpath)
         d = play.Player(_emu("vr_door_27_49.ss"), play.NullStreamer())
-        d.state_path = None
+        d.state_path = os.path.join(tmp, "probe.ss")  # Center errands resolve their json beside the save
         d.graph = map_graph.MapGraph(gpath, world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs())
         d.goal = {"mode": "travel", "to": [0, 43]}
         start, dest = d.g.position()[2:], (0, 43)
@@ -72,7 +72,7 @@ def main() -> None:
         gpath2 = os.path.join(tmp, "map_graph_sevii.json")
         shutil.copy(os.path.join(HERE, "states", "map_graph.json"), gpath2)
         s = play.Player(_emu("vr_door_27_49.ss"), play.NullStreamer())
-        s.state_path = None
+        s.state_path = os.path.join(tmp, "probe.ss")
         s.graph = map_graph.MapGraph(gpath2, world=rowe_rom.world_edges(), passthrough=rowe_rom.passthroughs())
         s.goal = {"mode": "sevii", "need": 16}
         sstart, schanged = s.g.position()[2:], None

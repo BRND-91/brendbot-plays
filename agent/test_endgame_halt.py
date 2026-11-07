@@ -36,6 +36,7 @@ def _player(badges):
     p.region = lambda: (0, 8, 0)
     p._blocked_from = lambda region: set()
     p._dive_frontier = lambda region, moves: False  # no dive off the cluster
+    p._leave_dynamic_interior = lambda here, moves: False  # Ever Grande is an outdoor map, no dynamic warp out
     demoted = []
     p.demote_to_grind = lambda here: demoted.append(here)
     return p, demoted

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import rowe_symbols as S
 from emu_boot import Emu
-from rowe_rom import NUM_NATURES
+from rowe_rom import NUM_NATURES, item_sets
 
 
 def decode_text(raw: bytes) -> str:
@@ -300,17 +300,18 @@ class GameState:
         return self.item_slots(sb1 + offset, slots)
 
     def item_slots(self, addr: int, slots: int) -> list:
-        """[(item_id, quantity)] for the filled {u16 item, u16 qty ^ key} slots at addr; the game keeps a
-        pocket packed from slot 0."""
+        """[(item_id, quantity)] for the filled {u16 item, u16 qty ^ key} slots at addr, in slot order.
+        A script removal (the fossil scientist taking a fossil) zeroes its slot in place and the next
+        bag open compacts the pocket, so an empty slot is skipped rather than read as the pocket's end;
+        the list order is the order the compacted bag shows."""
         sb2 = self.e.u32(S.addr("gSaveBlock2Ptr"))
         key = self.e.u32(sb2 + S.SB2_ENCRYPTION_KEY) & 0xFFFF
         raw = self.e.read(addr, 4 * slots)
         out = []
         for i in range(slots):
             item, qty = struct.unpack_from("<HH", raw, 4 * i)
-            if not item:
-                break
-            out.append((item, qty ^ key))
+            if item:
+                out.append((item, qty ^ key))
         return out
 
     def poke_balls(self) -> list:
@@ -325,6 +326,27 @@ class GameState:
 
     def key_items(self) -> list:
         return self.bag_pocket(S.SB1_BAG_KEY_ITEMS, S.BAG_KEY_ITEMS_SLOTS)
+
+    def items(self) -> list:
+        return self.bag_pocket(S.SB1_BAG_ITEMS, S.BAG_ITEMS_SLOTS)
+
+    def sellables(self, bag=None) -> list:
+        """[(item_id, quantity)] of the Items pocket a Mart buys back, bag order. The sell flow drains
+        these before buying; a bag passed in substitutes for the live pocket so the filter is testable
+        without a RAM save that happens to hold one."""
+        bag = self.items() if bag is None else bag
+        return [t for t in bag if t[0] in item_sets()["SELLABLE_ITEMS"]]
+
+    def fossils(self, bag=None) -> list:
+        """[(item_id, quantity)] of the fossils in the Items pocket; each is a roster candidate the
+        catch policy never sees until the Rustboro reviver turns it into a mon."""
+        bag = self.items() if bag is None else bag
+        return [t for t in bag if t[0] in item_sets()["FOSSIL_ITEMS"]]
+
+    def repels(self, bag=None) -> list:
+        """[(item_id, quantity)] of the repels held, for the travel-leg repel count."""
+        bag = self.items() if bag is None else bag
+        return [t for t in bag if t[0] in item_sets()["REPEL_ITEMS"]]
 
     def shop_items(self) -> list:
         """Item ids of the open Mart's Buy list in row order; empty when no shop is open."""

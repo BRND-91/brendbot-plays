@@ -16,6 +16,14 @@ class _Graph:
     def neighbors(self, node):
         return set()
 
+    def observe(self, here, neighbors):
+        self.visited.add(here)
+        return []
+
+    @staticmethod
+    def unblock(here, neighbor):
+        return False
+
 
 class _Emu:
     def __init__(self):

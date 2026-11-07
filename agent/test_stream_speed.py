@@ -45,6 +45,10 @@ def _push_harness(speed, frame_bytes, n):
     fs._gap_prev = None
     fs._gap_sec = None
     fs._gap_max = 0.0
+    fs._sec_main = 0
+    fs._sec_keep = 0
+    fs._main_gap = 0.0
+    fs._injected = False
     fs._main_push_at = None
     fs._frame_i = 0
     fs._next_deadline = time.monotonic()

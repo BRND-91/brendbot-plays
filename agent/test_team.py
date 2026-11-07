@@ -9,10 +9,12 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import map_graph
+import planner
 import rowe_rom
 import rowe_symbols as S
-from play import (CORE_MARGIN_FLOOR, FLEX_MARGIN, LEVEL_CUTOFF, Player, SwapLedger, best_swap, core_margin, flex_slot, foe_types,
-                  mon_profile, score_flex, team_score, wanted_types)
+from play import (CORE_MARGIN_FLOOR, FLEX_MARGIN, LEVEL_CUTOFF, Player, SwapLedger, best_swap, boss_edge, boss_foes, core_margin,
+                  flex_slot, foe_types, mon_profile, score_flex, team_score, wanted_types)
 
 NORMAL, FLYING, WATER, ICE, GRASS, POISON = 0, 2, 11, 15, 12, 3
 GREEDENT, MARILL, AZUMARILL, LAPRAS, MAGIKARP, PIDGEY, ODDISH = 820, 183, 184, 131, 129, 16, 43  # Lapras: Atk 85, SpA 85 in this ROM
@@ -78,6 +80,85 @@ def player(g: G, state_path: str) -> Player:
     return p
 
 
+class Cleared(G):
+    """16 badges and the game-clear bit up, no post-game boss beaten."""
+
+    def flag(self, flag_id: int) -> bool:
+        return flag_id == S.FLAG_SYS_GAME_CLEAR or super().flag(flag_id)
+
+
+GOLDUCK, SEAKING, STOUTLAND, DEWGONG, VIKAVOLT, DONPHAN, POOCHYENA, NUMEL = 55, 119, 508, 87, 738, 232, 261, 322
+SURF, EARTHQUAKE, BITE, EMBER = 57, 89, 44, 52
+
+
+def _postgame_party() -> list:
+    return [Mon(0, GOLDUCK, 100, [SURF]), Mon(1, GREEDENT, 100, [TACKLE, BITE]), Mon(2, STOUTLAND, 100, [TACKLE]),
+            Mon(3, SEAKING, 100, [SURF]), Mon(4, DEWGONG, 100, [SURF]), Mon(5, VIKAVOLT, 100, [TACKLE])]
+
+
+def test_postgame_cap_is_the_party_top_level():
+    """CAPS[-1] is 45 at 16 badges, so a L81 party member past the clear never grinds under the badge
+    cap; past the clear the cap is the party's top level and the low member grinds to it."""
+    party = [{"species": GOLDUCK, "level": 100, "moves": [{"name": "Surf", "power": 90, "pp": 10}]}] * 5
+    party = party + [{"species": VIKAVOLT, "level": 81, "moves": [{"name": "Spark", "power": 65, "pp": 10}]}]
+    status = {"map": [0, 18], "badges": 16, "badge_flags": [True] * 8, "johto_flags": [True] * 8,
+              "elite_flags": [True] * 4, "champion": True, "boss_flags": [False, False], "party": party,
+              "field_moves": ["SURF"], "wanted_types": ["Ground"], "caught_species": []}
+    ledger = planner.BOSS_LOSSES
+    with tempfile.TemporaryDirectory() as d:
+        planner.BOSS_LOSSES = os.path.join(d, "boss_losses.json")  # no loss on record, the boss is priced free
+        try:
+            g = map_graph.MapGraph(os.path.join(d, "map_graph.json"), world=rowe_rom.world_edges())
+            for m in ((0, 16), (0, 10), (0, 17), (0, 18), (0, 19)):
+                g.observe(m, [])
+            goal, why = planner.recommend(status, g)
+        finally:
+            planner.BOSS_LOSSES = ledger
+    assert goal["mode"] == "grind" and goal["cap"] == 100, (goal, why)
+    assert "L81 vs cap 100" in why, why
+
+
+def test_postgame_swap_scores_damage_against_the_boss_six():
+    """Past the clear the swap runs the damage formula at the party top against Steven's six as fielded.
+    A L65 Earthquake Donphan enters over the member w/ the lowest edge, the Tackle Vikavolt at -3.68,
+    whatever the level gap; a L39 Numel enters the same way over a L5 of the same species; a box mon no
+    better than the weakest member stays out; before the clear the cutoff holds."""
+    foes = boss_foes("Steven")
+    assert len(foes) == 6 and all(f.level == 100 and sum(1 for m in f.moves if m) == 4 for f in foes), foes
+    party = _postgame_party()
+    edges = {m.nickname + str(m.slot): round(boss_edge(m, 100, NO_IVS, foes), 2) for m in party}
+    assert min(edges, key=edges.get) == "Bug5" and edges["Bug5"] == -3.68, edges
+    assert round(boss_edge(Boxed(0, DONPHAN, 65, [EARTHQUAKE]), 100, NO_IVS, foes), 2) == 1.02, edges
+    with tempfile.TemporaryDirectory() as d:
+        donphan = Boxed(0, DONPHAN, 65, [EARTHQUAKE])
+        g = Cleared(_postgame_party(), [donphan], 8)
+        p = player(g, os.path.join(d, "clear.ss"))
+        p.goal = {"mode": "grind", "map": [0, 16], "cap": 100}
+        p.do_pc_swap()
+        assert p.errands.calls == [(5, 0)], f"the Ground catch enters over the Tackle Vikavolt, got {p.errands.calls}"
+        assert donphan in g.party()
+
+        # each case gets its own ledger dir: the swap above closed the core for CORE_SWAP_VISITS in d
+        low, lower = Boxed(1, NUMEL, 39, [EMBER]), Boxed(0, NUMEL, 5, [EMBER])
+        g2 = Cleared(_postgame_party(), [lower, low], 8)
+        p = player(g2, os.path.join(tempfile.mkdtemp(dir=d), "low.ss"))
+        p.goal = {"mode": "grind", "map": [0, 16], "cap": 100}
+        p.do_pc_swap()
+        assert p.errands.calls == [(5, 1)], f"the L39 Numel enters over the L5 of the same species, got {p.errands.calls}"
+
+        g4 = Cleared(_postgame_party(), [Boxed(0, VIKAVOLT, 100, [TACKLE])], 8)
+        p = player(g4, os.path.join(tempfile.mkdtemp(dir=d), "same.ss"))
+        p.goal = {"mode": "grind", "map": [0, 16], "cap": 100}
+        p.do_pc_swap()
+        assert p.errands.calls == [], f"a box mon no better than the weakest member stays out, got {p.errands.calls}"
+
+        g3 = G(_postgame_party(), [Boxed(0, DONPHAN, 65, [EARTHQUAKE])], 8)
+        p = player(g3, os.path.join(tempfile.mkdtemp(dir=d), "preclear.ss"))
+        p.goal = {"mode": "grind", "map": [0, 16], "cap": 100}
+        p.do_pc_swap()
+        assert p.errands.calls == [], f"before the clear the cutoff holds, got {p.errands.calls}"
+
+
 def main() -> None:
     assert rowe_rom.species(GREEDENT).types == (NORMAL, NORMAL)
     assert rowe_rom.species_at_level(MARILL, 41) == AZUMARILL
@@ -114,7 +195,9 @@ def main() -> None:
     gaps = wanted_types(team, core)
     assert {ROCK, FIRE, GROUND, GHOST} <= gaps, f"Normal attacks alone leave every foe type wanted, got {gaps}"
     gaps = wanted_types(mixed, core)
-    assert not {ROCK, FIRE, GROUND} & gaps and GHOST in gaps, f"a Water attack closes Rock, Fire and Ground, got {gaps}"
+    assert {ROCK, FIRE, GROUND, GHOST} <= gaps, f"one Water attacker is under COVER_DEPTH, every type stays wanted, got {gaps}"
+    gaps = wanted_types(team[:4] + [marill, marill], core)
+    assert not {ROCK, FIRE, GROUND} & gaps and GHOST in gaps, f"two Water attackers close Rock, Fire and Ground, got {gaps}"
 
     with tempfile.TemporaryDirectory() as d:
         state = os.path.join(d, "route101.ss")
@@ -140,18 +223,14 @@ def main() -> None:
         p.do_pc_swap()
         led = json.load(open(ledger))
         assert led["visits"] == 5 and len(p.errands.calls) <= 1 and led["last_core_visit"] in (1, 5), led
-        # the level cutoff: a candidate ten under the grind map's top wild level is cut before scoring
-        # Spark (physical Electric) covers Water and Flying, so a low Magikarp, Gyarados at the floor, is not a wanted type
+        # the level cutoff in best_swap: the Marill that lifts the core by 76 at the floor is cut at 11
+        # under the slot it would take and pays a point per level at 10 under. Every mon whose swap
+        # scores carries a wanted type (coverage is what scores), so the do_pc_swap prefilter below only
+        # ever exempts; the gate that cuts a low catch is this one
         top_map, (_, top) = max(rowe_rom.wild_land_levels().items(), key=lambda kv: kv[1][1])
-        g2 = G([Mon(i, GREEDENT, 41, [TACKLE, SPARK]) for i in range(6)], [Boxed(0, MAGIKARP, max(1, top - LEVEL_CUTOFF - 1), [TACKLE])], 3)
-        p = player(g2, os.path.join(d, "two.ss"))
-        p.goal = {"mode": "grind", "map": list(top_map)}
-        p.do_pc_swap()
-        assert not p.wanted & {WATER, FLYING}, p.wanted
-        assert p.errands.calls == [], f"a L{top - LEVEL_CUTOFF - 1} catch under a L{top} grind map is cut, got {p.errands.calls}"
-        p.goal = {"mode": "gym", "map": [11, 3]}
-        p.do_pc_swap()
-        assert len(p.errands.calls) == 1, "off a grind the cutoff does not apply"
+        assert best_swap(team, [(0, marill)], core, core_slots, core_margin(team, core)) == (1, 0, 76)
+        assert best_swap(team, [(0, marill)], core, core_slots, core_margin(team, core), ([41] * 6, {0: 41 - LEVEL_CUTOFF - 1})) is None
+        assert best_swap(team, [(0, marill)], core, core_slots, core_margin(team, core), ([41] * 6, {0: 41 - LEVEL_CUTOFF})) == (1, 0, 66)
         # a wanted-type catch is exempt from the cutoff: six Normals want Water's targets, so a low Marill scores
         g3 = G([Mon(i, GREEDENT, 41, [TACKLE]) for i in range(6)], [Boxed(0, MARILL, max(1, top - LEVEL_CUTOFF - 1), [WATER_GUN])], 3)
         p = player(g3, os.path.join(d, "three.ss"))
@@ -211,6 +290,8 @@ def main() -> None:
         p.goal = {"mode": "grind", "map": [0, 16], "cap": 15}
         p.do_pc_swap()
         assert p.errands.calls == [(5, 0)], f"the same board with no lock swaps the flyer out, got {p.errands.calls}"
+    test_postgame_cap_is_the_party_top_level()
+    test_postgame_swap_scores_damage_against_the_boss_six()
     print("ok")
 
 

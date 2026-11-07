@@ -16,7 +16,7 @@ def _status(boss_flags):
         "badges": 16,
         "badge_flags": [True] * 8,
         "johto_flags": [True] * 8,
-        "party": [{"level": 100, "moves": [{"name": "Surf", "power": 90, "pp": 10}]} for _ in range(6)],
+        "party": [{"species": 260, "level": 100, "moves": [{"name": "Surf", "power": 90, "pp": 10}]} for _ in range(6)],
         "map": list(HALL_OF_FAME),
         "field_moves": ["CUT", "DIVE", "ROCKCLIMB", "ROCKSMASH", "SURF", "WATERFALL"],
         "champion": True,

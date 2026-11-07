@@ -1,0 +1,66 @@
+--- a/index.html
++++ b/index.html
+@@ -405,6 +405,7 @@
+   <div id="say" class="sr" aria-live="polite"></div>
+   <button id="sound" type="button" aria-pressed="false">sound off</button>
+   <button id="view" type="button" aria-pressed="false">boxes</button>
++  <button id="speed" type="button" aria-pressed="false" hidden>speed 1x</button>
+ </header>
+ <main>
+   <div id="stage">
+@@ -1114,6 +1115,55 @@
+ window.addEventListener('hashchange', showView);
+ showView();
+ 
++// ---- speed control (admin only) ----
++// The /api/speed endpoint is bearer-token gated. The token is pasted once as
++// ?sk=<token>, which stores it and strips the query, so the button appears and
++// works only for whoever holds it; a visitor without it never sees the control.
++// A press sets the server-side grind speed for every viewer, which re-spawns the
++// encoder, so the stream reconnects for a beat before it resumes at the new rate.
++const SPEED_KEY = 'rowe-sk';
++const SPEED_STEPS = [1, 2, 4];
++const speedBtn = document.getElementById('speed');
++(function initSpeed() {
++  const q = new URLSearchParams(location.search);
++  if (q.has('sk')) {
++    localStorage.setItem(SPEED_KEY, q.get('sk'));
++    q.delete('sk');
++    const rest = q.toString();
++    history.replaceState(null, '', location.pathname + (rest ? '?' + rest : '') + location.hash);
++  }
++  const token = localStorage.getItem(SPEED_KEY);
++  if (!token) return;
++  speedBtn.hidden = false;
++  let speed = 1;
++  function show() {
++    speedBtn.textContent = 'speed ' + speed + 'x';
++    speedBtn.classList.toggle('on', speed > 1);
++    speedBtn.setAttribute('aria-pressed', String(speed > 1));
++  }
++  fetch('api/speed', { cache: 'no-store' })
++    .then(r => r.json())
++    .then(d => { if (SPEED_STEPS.includes(d.speed)) speed = d.speed; show(); })
++    .catch(show);
++  speedBtn.addEventListener('click', async () => {
++    const next = SPEED_STEPS[(SPEED_STEPS.indexOf(speed) + 1) % SPEED_STEPS.length];
++    speedBtn.disabled = true;
++    try {
++      const r = await fetch('api/speed', {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
++        body: JSON.stringify({ speed: next }),
++      });
++      if (r.ok) { speed = next; show(); }
++      else { speedBtn.textContent = r.status === 403 ? 'speed: denied' : 'speed: error'; }
++    } catch (e) {
++      speedBtn.textContent = 'speed: error';
++    } finally {
++      speedBtn.disabled = false;
++    }
++  });
++})();
++
+ // ---- HLS, the default transport (served over 443, always reachable) ----
+ function stopHls() {
+   clearTimeout(hlsTimer);

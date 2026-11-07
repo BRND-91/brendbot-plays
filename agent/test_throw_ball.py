@@ -24,6 +24,9 @@ class G:
     def bag_position(self) -> tuple:
         return S.BAG_POCKET_POKE_BALLS, self.cursor
 
+    def poke_balls(self) -> list:
+        return [(4, 5)]  # one Poke Ball stack at pocket row 0
+
     def in_battle(self) -> bool:
         return True
 
@@ -37,10 +40,18 @@ class E:
         pass
 
 
+class Errands:
+    """The bag is already on the Poke Balls tab in these fakes, so the pocket walk is a no-op."""
+    @staticmethod
+    def bag_to_pocket(pocket: int, settle: int = 25, tries: int = 6) -> bool:
+        return True
+
+
 def player(g: G) -> Player:
     p = Player.__new__(Player)
     p.g = g
     p.e = E()
+    p.errands = Errands()
     p.keys = []
 
     def tap(keys: int, hold: int = 8, gap: int = 12) -> None:

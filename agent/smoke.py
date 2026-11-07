@@ -773,12 +773,12 @@ def item_ball_detour_collects_then_skips_the_collected_ball():
     import play
     e = _load("woods_south.ss")
     ex = play.Player(e, play.NullStreamer(), ledger_path="/tmp/rowe-smoke-caught.json")
-    before = ex.collectable_balls()
+    before = ex.collectable_items()
     assert len(before) >= 2, f"fixture must offer at least two reachable balls: {before}"
     target = before[0]
     assert ex.collect_step() is True, "no detour taken with a reachable ball uncollected"
     assert ex.g.flag(target[2]), "the ball's collected flag did not flip after the pickup"
-    after = ex.collectable_balls()
+    after = ex.collectable_items()
     assert (target[0], target[1]) not in {(b[0], b[1]) for b in after}, "collected ball still offered for a detour"
     assert len(after) == len(before) - 1, f"detour list changed by more than the collected ball: {before} -> {after}"
 

@@ -23,7 +23,7 @@ from typing import NamedTuple
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import emu_boot as eb  # noqa: E402
 import rowe_rom  # noqa: E402
-from battle_engine import as_battler, best_switch, edge, first_usable_slot, move_value, outmatched, rank_moves, replacement_slot, strongest_bench, weakening_move  # noqa: E402
+from battle_engine import BELCH_EFFECT, as_battler, best_switch, boss_edge, boss_foes, edge, first_usable_slot, lead_steps_out, move_value, rank_moves, replacement_slot, strongest_bench, weakening_move  # noqa: E402
 import catch  # noqa: E402
 import map_graph  # noqa: E402
 import planner  # noqa: E402
@@ -33,7 +33,7 @@ import rowe_map  # noqa: E402
 import rowe_symbols as S  # noqa: E402
 import script_decode  # noqa: E402
 from nav import DIVE_BEHAVIORS, Grid, ITEM_WATERFALL_TOOL, Navigator, WATER_BEHAVIORS  # noqa: E402
-from routines import Errands, landing_rank  # noqa: E402
+from routines import DEPT_STORE_CLIMB, LILYCOVE, Errands, landing_rank  # noqa: E402
 from rowe_state import GameState  # noqa: E402
 from stream_sink import FrameStreamer  # noqa: E402
 
@@ -178,6 +178,7 @@ LEAGUE_LOBBY = (16, 10)
 HALL_OF_FAME = (16, 11)  # the ceremony room after the Champion; its script runs on A until the game-clear bit is set
 LOBBY_NURSE_STAND = (4, 4)  # below the nurse's counter, facing up; the object is unloaded from the entry mat
 LOBBY_CLERK_STAND = (16, 4)  # below the clerk's counter, facing up
+DEPT_STORE_4F = DEPT_STORE_CLIMB[-1]  # the Lilycove TM floor, two clerks gated on the 5th and 10th badge rewards
 ELITE_STAND = (6, 6)  # below the trainer at (6,5), the same tile in all four Elite Four rooms and the Champion's
 # room -> the flag its win sets; the Champion's win is the game-clear bit
 ELITE_FLAGS = {**dict(zip(((16, 0), (16, 1), (16, 2), (16, 3)), S.FLAG_DEFEATED_ELITE_4)), (16, 4): S.FLAG_SYS_GAME_CLEAR}
@@ -216,6 +217,17 @@ def hp_tier(max_hp: int) -> int:
     return next((iid for iid in HP_TIERS if HP_ITEMS[iid] >= need), HP_TIERS[-1])
 
 
+def ball_to_buy(budget: int, batch: int) -> int:
+    """Strongest ball tier a full batch fits in `budget` past the reserve, Poké Balls when even those
+    do not, so a flush balance asks for Ultra Balls and buy_from_list's ladder drops to the strongest
+    tier the Mart carries."""
+    sets = rowe_rom.item_sets()
+    for iid in reversed(sets["BALL_TIERS"]):
+        if rowe_rom.item_price(iid) * batch <= budget:
+            return iid
+    return catch.POKE_BALL
+
+
 def shopping_list(money: int, balls: int, medicine: list, party: list) -> list:
     """[(item id, qty)] for the next counter: balls, then HP restores, then cures, each only
     when its count sits under the floor, each batch cut to the money left past the reserve."""
@@ -223,7 +235,7 @@ def shopping_list(money: int, balls: int, medicine: list, party: list) -> list:
     floor, batch = BALL_SPEND if len(party) < PARTY_SIZE else BALL_SPEND_FULL
     wants = []
     if balls < floor:
-        wants.append((catch.POKE_BALL, batch))
+        wants.append((ball_to_buy(money - MONEY_RESERVE, batch), batch))
     if sum(q for iid, q in medicine if iid in HP_ITEMS) < HP_SPEND[0]:
         wants.append((hp_tier(max(m.max_hp for m in party)), HP_SPEND[1]))
     wants.extend((iid, CURE_SPEND[1]) for iid in CURE_BUYS if held.get(iid, 0) < CURE_SPEND[0])
@@ -236,6 +248,25 @@ def shopping_list(money: int, balls: int, medicine: list, party: list) -> list:
             out.append((iid, qty))
             budget -= qty * price
     return out
+
+
+def tm_shopping(party: list, ivs: tuple, bag: list, money: int, clerks: list, builds: list) -> list:
+    """[(clerk tile, [(TM item id, 1)])] worth a Department Store trip: the TMs tm_assignments would
+    teach off the clerks' lists that the bag lacks, in its order, each kept only while the money
+    past the reserve covers it. `clerks` is [(tile, item ids)] w/ the list the flag state opens."""
+    held = {iid for iid, _ in bag}
+    stock = [(iid, 1) for _, items in clerks for iid in items if iid not in held]
+    budget = money - MONEY_RESERVE
+    out = {}
+    for slot, _i, _f, _mv in tm_assignments(party, ivs, stock, builds):
+        iid = stock[slot][0]
+        price = rowe_rom.item_price(iid)
+        if price > budget:
+            continue
+        budget -= price
+        tile = next(t for t, items in clerks if iid in items)
+        out.setdefault(tile, []).append((iid, 1))
+    return list(out.items())
 OUTCOME_CAUGHT = 7
 OUTCOME_LOST = 2  # gBattleOutcome when the party faints out, which whites the player to the last Center
 OUTCOME_DREW = 3  # both sides down the same turn, a gym non-clear the same as a loss
@@ -254,6 +285,9 @@ IDLE_STREAK = 5  # explore ticks finding no hop before the run re-plans, so a po
 # bounced or dead-ended relaunches off the snapshot instead of freezing the frame on run(60) forever
 CYCLE_WINDOW = 12  # recent map landings watched for a loop longer than the 2-map bounce _last_hop catches
 CYCLE_HITS = 4  # times one map recurs in that window with no new map found before the run re-plans
+MENU_TAP_CAP = 24  # B presses at a menu before the run gives it up: the Start menu closes in three, a
+# script-opened party pick (the Verdanturf Battle Tent's) ignores B, A and the cursor, and the live
+# run tapped B there for 11 minutes w/o a log line until the supervisor's spin-break
 CB2_EVOLUTION = 0x8197385  # gMain.callback2 while "What? X is evolving!" plays, read off a stall dump
 CB2_NAMING = 0x813088D  # gMain.callback2 on the nickname keyboard, read off a stall dump; START is its OK
 BATTLE_TYPE_TRAINER = 0x08  # gBattleTypeFlags bit; a trainer battle refuses Run
@@ -380,10 +414,14 @@ CORE_MARGIN_FLOOR = 5   # a core swap needs the larger of this and a CORE_MARGIN
 CORE_MARGIN_SHARE = 10
 FLEX_MARGIN = 2         # points a boxed mon must out-score the current flex mon by before the flex slot moves
 FLEX_GRIND_DIV = 4      # levels under the cap a flex candidate trades for one point of counter score
+COVER_DEPTH = 2         # members that must each hit a foe type super effectively, or resist a foe attack type the
+# party is weak to, before it stops being a gap: one Mud Bomb against Steven's four Steels is a single point of failure
 VALUE_DIV = 20          # stat points per score point; a L40 mon's offence + Spe + mean bulk runs ~260, so 13
 CORE_SWAP_VISITS = 4    # heal visits between core swaps, and the visits a mon swapped into the core stays put
 BARRED_VISITS = 8       # heal visits a swapped-out mon stays out of the candidate pool
 LEVEL_CUTOFF = 10       # a candidate this far under the grind map's top wild level is cut before scoring
+BOSS_SWAP_MARGIN = 0.5  # summed edge a box mon must beat the weakest member by past the clear, half one foe's HP net
+PACE_SAMPLES = 20       # battle ends and travel hops kept for the exp-per-minute and hop-time measurements
 
 
 class SwapLedger:
@@ -478,12 +516,35 @@ def team_score(team: list, builds: list) -> int:
     return sum(matchup(team, foes) for foes in builds) + sum(p.value for p in team) // VALUE_DIV
 
 
-def wanted_types(team: list, builds: list) -> frozenset:
-    """Types among the builds' foes that no attack type on the team hits super effectively, the gaps
-    the catch policy fills first."""
+def wanted_types(team: list, builds: list, depth: int = COVER_DEPTH) -> frozenset:
+    """Foe types among the builds that fewer than `depth` members hit super effectively w/ a credited
+    attack type, the gaps the TM, egg and catch policies fill first."""
     kinds = {t for foes in builds for ft in foes for t in ft if t != TYPE_MYSTERY}
-    attacks = frozenset().union(*(p.attack_types for p in team))
-    return frozenset(t for t in kinds if not any(rowe_rom.effectiveness(a, (t,)) > 1 for a in attacks))
+    return frozenset(t for t in kinds
+                     if sum(any(rowe_rom.effectiveness(a, (t,)) > 1 for a in p.attack_types) for p in team) < depth)
+
+
+def wanted_catch_types(team: list, builds: list, depth: int = COVER_DEPTH) -> frozenset:
+    """Mon types a catch or a box pick should carry: every attack type super effective on a wanted foe
+    type, since a species attacks w/ its own types, plus every type that resists a foe type at least
+    `depth` members are weak to while fewer than `depth` resist it. Matching the foe type itself sent
+    the reserve balls at Fairy mons when Fairy was the type nobody hit."""
+    kinds = {t for foes in builds for ft in foes for t in ft if t != TYPE_MYSTERY}
+    types = [t for t in range(rowe_rom.NUM_TYPES) if t != TYPE_MYSTERY]
+    want = {a for t in wanted_types(team, builds, depth) for a in types if rowe_rom.effectiveness(a, (t,)) > 1}
+    for t in kinds:
+        weak = sum(rowe_rom.effectiveness(t, p.types) > 1 for p in team)
+        resist = sum(rowe_rom.effectiveness(t, p.types) < 1 for p in team)
+        if weak >= depth and resist < depth:
+            want.update(r for r in types if rowe_rom.effectiveness(t, (r,)) < 1)
+    return frozenset(want)
+
+
+def attack_types(m) -> set:
+    """Types of the damaging moves `m` holds. A taught move of one of these adds no coverage, and w/o
+    the check the TM pass and the egg pass each read the other's move as the slot's weakest and trade
+    them back every visit, Rock Tomb for Mach Punch beside Close Combat."""
+    return {rowe_rom.move(mid).type for mid in m.moves if mid and rowe_rom.move(mid).power > 0}
 
 
 def tm_assignments(party: list, ivs: tuple, tms: list, builds: list) -> list:
@@ -514,7 +575,7 @@ def tm_assignments(party: list, ivs: tuple, tms: list, builds: list) -> list:
                 if i == flex or i in taken or mv.id in m.moves or item not in rowe_rom.tm_learnset(m.species):
                     continue
                 st = offence[i]
-                if st[mv.split] < st[1 - mv.split]:
+                if st[mv.split] < st[1 - mv.split] or mv.type in attack_types(m):
                     continue
                 forget = replacement_slot(m, mv.id)
                 if forget is not None and (best is None or st[mv.split] > best[0]):
@@ -580,7 +641,7 @@ def egg_assignments(party: list, ivs: tuple, bp: int, builds: list, declined: fr
                 mv = rowe_rom.move(mid)
                 if mv.power <= 0 or mv.split == rowe_rom.SPLIT_STATUS or rowe_rom.effectiveness(mv.type, (t,)) <= 1:
                     continue
-                if offence[mv.split] < offence[1 - mv.split]:
+                if offence[mv.split] < offence[1 - mv.split] or mv.type in attack_types(m):
                     continue
                 forget = replacement_slot(m, mid)
                 key = (offence[mv.split], mv.power * (mv.accuracy or 100))
@@ -624,9 +685,24 @@ def best_swap(team: list, box: list, builds: list, slots, margin: int, levels: t
             gain = team_score(trial, builds) - base
             if levels is not None:
                 gain -= max(0, levels[0][out] - levels[1][slot])
+            if gain < margin:
+                continue
             if best is None or gain > best[2]:
                 best = (out, slot, gain)
-    return best if best and best[2] >= margin else None
+    return best
+
+
+def best_boss_swap(party: list, box: list, level: int, ivs: tuple, foes: list, slots, margin: float):
+    """(party slot out, box slot in, gain) trading the member in `slots` w/ the lowest boss_edge for the
+    box mon w/ the highest, both scored at `level`, or None when the gain is under `margin`. box is
+    [(box slot, mon, level)]; between two box mons of equal edge the higher level wins, the shorter grind."""
+    if not slots or not box:
+        return None
+    held = {i: boss_edge(party[i], level, ivs, foes) for i in slots}
+    out = min(held, key=held.get)
+    slot, _, _ = max(box, key=lambda b: (boss_edge(b[1], level, ivs, foes), b[2]))
+    gain = boss_edge(next(b[1] for b in box if b[0] == slot), level, ivs, foes) - held[out]
+    return (out, slot, round(gain, 2)) if gain >= margin else None
 
 
 def score_flex(prof: Profile, level: int, cap: int, nxt: list) -> int:
@@ -768,8 +844,16 @@ class Player:
         self.need_heal = False
         self.shopping = []  # (item id, qty) for the next counter, from shopping_list after each battle
         self.mart_trek = False  # the list alone justifies walking to town, else it waits for a heal run
+        self.tm_wants = []  # [(4F clerk tile, [(TM item id, 1)])] from tm_shopping after each heal visit
+        self.tm_trek = False  # a non-empty tm_wants walks to Lilycove and climbs the Department Store
+        self._fossil_fails = 0  # revive attempts that came back short; planner.FOSSIL_FAIL_CAP ends the errand
         self._lobby_stocked = False  # the League lobby's nurse and clerk visited this entry; a whiteout resets it
         self._cutscene_cb2 = None  # last non-field callback logged by cutscene_step
+        self._menu_cb2 = None  # last menu callback it backed out of; kept apart so the field's return raises no GoalExit
+        self._menu_taps = 0  # B presses since that menu opened, against MENU_TAP_CAP
+        self._script_cross = None  # (here, hop) of the last talked script-door crossing, until a hop moves
+        self._last_boss = None  # boss map whose fight just started, for the whiteout-loss tally
+        self._boss_fight = None  # (fight-start epoch, money) of the open boss fight, the attempt row's first half
         self.rng = random.Random()
         self.battles = 0
         self.wins = 0
@@ -790,6 +874,11 @@ class Player:
         self._live_writer = False  # only the live run (main) may write the live save and its ring
         self.goal = dict(DEFAULT_GOAL)
         self.events = collections.deque(maxlen=20)
+        self._lead_exp: collections.deque = collections.deque(maxlen=PACE_SAMPLES)  # (epoch, lead personality, lead exp) per battle end
+        self._hop_sec: collections.deque = collections.deque(maxlen=PACE_SAMPLES)  # seconds per map change on travel and explore legs
+        self._hop_map: tuple | None = None
+        self._hop_at = 0.0
+        self._pace_path: str | None = None  # states/pace.json, the two sample sets persisted across runs
         self.event_seq = 0  # lines ever said; the live page prepends the delta since its last row
         self._party_full = None  # personalities last written to party_full.json
         self.exit_reason = ""
@@ -991,7 +1080,7 @@ class Player:
         self._start_items.setdefault(me.personality, me.item)
         disabled = self.g.disabled_move(me.battler)
         used = frozenset(self._used_slots.get(me.personality, ()))
-        ranked = [s for foe in foes for s in rank_moves(me, foe, used)
+        ranked = [s for foe in foes for s in rank_moves(me, foe, used, self._berry_eaten(me))
                   if me.moves[s.slot] != disabled and s.slot not in self._avoid_slots
                   and self._selectable(me, s.move)]
         if ranked:
@@ -1007,23 +1096,26 @@ class Player:
         self._last_pick = max(usable, key=lambda i: me.pp[i]) if usable else first_usable_slot(me.moves, me.pp)
         return self._last_pick
 
-    def _selectable(self, me, move) -> bool:
-        """Belch cannot be chosen until the user's held item is gone this battle, the engine's
-        eaten-berry precondition approximated as a nonzero item at the first action now at zero. A
-        consumed gem or herb trips the same approximation, and the unstick slot-swap is the net for
-        that false positive. Every other move is selectable here."""
-        if move.name.lower() != "belch":
-            return True
+    def _berry_eaten(self, me) -> bool:
+        """The engine's eaten-berry precondition approximated as a nonzero item at the mon's first
+        action now at zero. A consumed gem or herb trips the same approximation, and the unstick
+        slot-swap is the net for that false positive."""
         return self._start_items.get(me.personality, me.item) != 0 and me.item == 0
+
+    def _selectable(self, me, move) -> bool:
+        """Belch cannot be chosen until the user's berry is gone this battle; every other move is."""
+        return move.effect != BELCH_EFFECT or self._berry_eaten(me)
 
     def catch_plan(self, me, foes) -> tuple:
         """("throw", None) | ("move", slot) | None when no ball goes out this turn.
 
         A ball only flies at a lone foe, so a double battle KOs one side first; a trainer
         blocks the ball and the game still consumes it."""
-        if self.g.badges() >= len(planner.ALL_GYMS):
-            # the team is built once every gym is down: a soften switch or a chip move in Victory
-            # Road is a free hit taken for a box the run never opens, so the fight goes to max damage
+        species = self.goal.get("species")
+        if self.g.badges() >= len(planner.ALL_GYMS) and not self.wanted and species is None:
+            # with the team built and no wanted types left, a soften switch or a chip move in Victory
+            # Road is a free hit taken for a box the run never opens, so the fight goes to max damage.
+            # A rebuild run still carries a wanted list at 16 badges and keeps catching those types.
             return None
         flags = self.g.battle_type_flags()
         if flags & BATTLE_TYPE_TRAINER or flags & BATTLE_TYPE_DOUBLE:
@@ -1031,11 +1123,13 @@ class Player:
             # flow, which drives the single-foe menu, loops the party screen for a non-lead battler.
             # Fight both mons down instead; the catch waits for a single encounter.
             return None
-        balls = dict(self.g.poke_balls()).get(catch.POKE_BALL, 0)
-        if len(foes) != 1 or not self.ledger.wants(foes[0], self.wanted, balls) or not self.g.poke_balls():
+        balls_held = dict(self.g.poke_balls())
+        balls = catch.ball_count(balls_held)
+        if len(foes) != 1 or not self.ledger.wants(foes[0], self.wanted, balls, species) or balls == 0:
             return None
         foe = foes[0]
-        chance = catch.catch_chance(foe)
+        _, mult = catch.strongest_ball(balls_held)
+        chance = catch.catch_chance(foe, mult)
         if chance >= THROW_AT:
             print(f"  throw: {foe.nickname} {foe.hp}/{foe.max_hp} status {foe.status1:#x} chance {chance:.0%}", flush=True)
             return "throw", None
@@ -1080,10 +1174,14 @@ class Player:
             self.tap(eb.KEY_B)
             return
         self.errands.bag_to_pocket(S.BAG_POCKET_POKE_BALLS, settle=30)
-        for _ in range(8):
-            if self.g.bag_position()[1] == 0:
+        balls = self.g.poke_balls()
+        ball_id, _ = catch.strongest_ball(dict(balls))
+        target = next((i for i, (iid, _) in enumerate(balls) if iid == ball_id), 0)
+        for _ in range(len(balls) + 8):
+            cur = self.g.bag_position()[1]
+            if cur == target:
                 break
-            self.tap(eb.KEY_UP)
+            self.tap(eb.KEY_DOWN if cur < target else eb.KEY_UP)
         self.tap(eb.KEY_A)
         self.run(40)
         self.tap(eb.KEY_A)
@@ -1394,12 +1492,10 @@ class Player:
                 self.switch_to = None
                 print(f"  switch stalled: party menu never opened (cb2 {self.g.callback2():#x})", flush=True)
                 return
-        if not flags & BATTLE_TYPE_TRAINER and not flags & BATTLE_TYPE_DOUBLE and self._exp_lead(me) and outmatched(me, foes):
-            # the lowest mon leads so each wild fight pays it an exp share, and it fights the round
-            # itself to earn that exp, stepping out only when a foe carries a hit worth half its bar.
-            # a healthy lead swapped on a close level gap handed the foe a free turn every fight for
-            # an exp split it already gets by standing on the field, the switch-for-no-reason a
-            # viewer sees; the low-HP switch above still covers a fight that turns.
+        if not flags & BATTLE_TYPE_TRAINER and not flags & BATTLE_TYPE_DOUBLE and self._exp_lead(me) and lead_steps_out(me, foes):
+            # the lowest mon leads so each wild fight pays it an exp share; it fights the round itself
+            # only against a foe under its own level that carries no hit worth half its bar, and steps
+            # out for the strongest bench mon otherwise
             pick = strongest_bench(self.g.party(), me, foes)
             if pick is not None and not self._wild_switched and self._switch_budget(me.personality):
                 print(f"  switch: {me.nickname} L{me.level} led for exp, slot {pick[0]} in", flush=True)
@@ -1788,10 +1884,45 @@ class Player:
             self._stall_dump(f"STALL: {STALL_STEPS} steps w/o change, chooser {self.g.chooser()} exec {sig[0]:#x}")
         return streak + 1
 
+    def exp_per_min(self) -> float | None:
+        """The lead's exp gain per minute over the last PACE_SAMPLES battle ends, the planner's
+        train-to-floor rate; consecutive battles only, w/ the same mon leading both, so a lead
+        rotation or a swap never reads as a gain. None until two such battles are in."""
+        pairs = [(b[0] - a[0], b[2] - a[2]) for a, b in zip(self._lead_exp, list(self._lead_exp)[1:])
+                 if a[1] == b[1] and b[0] > a[0] and b[2] > a[2]]
+        if not pairs:
+            return None
+        return sum(exp for _dt, exp in pairs) / (sum(dt for dt, _exp in pairs) / 60)
+
+    def hop_sec(self) -> float | None:
+        """Median seconds per field map change, the planner's hop time; None until a border has been
+        crossed."""
+        if not self._hop_sec:
+            return None
+        return sorted(self._hop_sec)[len(self._hop_sec) // 2]
+
+    def _load_pace(self, path: str) -> None:
+        """Refill the exp and hop sample sets from the last run's pace.json, so the first plan after a
+        relaunch is priced w/ measurements instead of the planner's cold-start defaults."""
+        self._pace_path = path
+        if not os.path.exists(path):
+            return
+        with open(path) as f:
+            pace = json.load(f)
+        self._lead_exp.extend(tuple(row) for row in pace["lead_exp"])
+        self._hop_sec.extend(pace["hop_sec"])
+
+    def _save_pace(self) -> None:
+        if not self._pace_path:
+            return
+        write_json(self._pace_path, {"lead_exp": list(self._lead_exp), "hop_sec": list(self._hop_sec)})
+
     def say(self, line: str) -> None:
+        """Event line for status.json and the log; the log copy carries a UTC stamp, since the `=== run`
+        headers were the only stamped lines and nothing in the log could time a boss retry."""
         self.events.append(line)
         self.event_seq += 1
-        print(line, flush=True)
+        print(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {line}", flush=True)
 
     def _sync_tickets(self, tickets: frozenset) -> None:
         """Rebuild the graph's ferry layer when the held key-item set changes, so a Sevii ticket
@@ -1809,6 +1940,13 @@ class Player:
         x, y, group, num = self.g.position()
         tickets = frozenset(i for i, _q in self.g.key_items())
         party = [party_row(m) for m in self.g.party() if m.level]  # a slot mid-deposit reads level 0
+        boss, ivs = self.next_boss(), self.g.iv_boosts()
+        if boss is not None and party:
+            # each member's summed edge against the next boss's six at the party top, what the planner
+            # weighs a catchable species against (planner.catch_target)
+            foes, top = boss_foes(boss), max(m["level"] for m in party)
+            for row, m in zip(party, (m for m in self.g.party() if m.level)):
+                row["boss_edge"] = round(boss_edge(m, top, ivs, foes), 2)
         # the last full roster, what fill_party brings back first after an interrupted swap
         if len(party) == PARTY_SIZE and self.state_path:
             full = sorted(m["personality"] for m in party)
@@ -1823,7 +1961,8 @@ class Player:
         status = {
             "ts": time.time(), "pid": os.getpid(), "goal": self.goal,
             "map": [group, num], "tile": [x, y], "party": party, "boxes": boxes, "field_moves": sorted(self.field_moves()),
-            "balls": dict(self.g.poke_balls()).get(catch.POKE_BALL, 0), "money": self.g.money(),
+            "balls": catch.ball_count(dict(self.g.poke_balls())), "money": self.g.money(),
+            "fossils": [i for i, _q in self.g.fossils()], "fossil_fails": self._fossil_fails,
             "badges": self.g.badges(), "var_badges": self.g.var(S.VAR_NUM_BADGES),
             "badge_flags": [self.g.flag(S.FLAG_BADGE01 + i) for i in range(S.BADGE_COUNT)],
             "johto_flags": [self.g.flag(S.JOHTO_BADGE01 + i) for i in range(S.JOHTO_BADGE_COUNT)],
@@ -1836,11 +1975,13 @@ class Player:
             "dex_owned": dex_owned, "dex_seen": dex_seen, "rom_sha": rom_sha(),
             "wanted_types": sorted(rowe_rom.TYPE_NAMES[t] for t in self.wanted),
             "battles": self.battles, "wins": self.wins, "caught": self.caught,
+            "exp_per_min": self.exp_per_min(), "hop_sec": self.hop_sec(), "iv_boosts": list(ivs),
             "events": list(self.events), "event_seq": self.event_seq, "exit_reason": self.exit_reason,
             "tickets": sorted(tickets),
             "hidden_givers": sorted(list(m) for m in self._gone_givers()),
         }
         self._sync_tickets(tickets)
+        self._save_pace()
         path = os.path.join(os.path.dirname(self.state_path), "status.json")
         with open(path + ".tmp", "w") as f:
             json.dump(status, f, indent=1)
@@ -1863,6 +2004,10 @@ class Player:
             if cap is None and self._held and hold_stale(self._held, self.graph, self.field_moves(), self.battles):
                 self._held = None
                 raise GoalExit("hold-grind re-checking the gated frontier, re-planning")
+            if self.goal.get("coverage") and len(self.ledger.caught) > self.goal["caught_n"]:
+                # the catch the grind was for is in the box; the next heal visit's swap can change the
+                # party, which reopens the held boss
+                raise GoalExit(f"coverage catch landed, {len(self.ledger.caught)} species caught, re-planning")
             return
         if mode == "travel":
             if here == tuple(self.goal.get("to", ())):
@@ -1884,6 +2029,12 @@ class Player:
                    + sum(self.g.flag(S.JOHTO_BADGE01 + i) for i in range(S.JOHTO_BADGE_COUNT)))
             if won > self.goal.get("flags", self.goal.get("badges", 0)):
                 raise GoalExit(f"goal reached: gym cleared, {won} league flags up")
+            return
+        if mode == "errand":
+            if not self.g.fossils():
+                raise GoalExit("goal reached: every fossil revived")
+            if self._fossil_fails >= planner.FOSSIL_FAIL_CAP:
+                raise GoalExit(f"fossil errand dropped after {self._fossil_fails} short revives")
             return
         if mode == "done":
             raise GoalExit(DONE_EXIT)
@@ -2029,6 +2180,13 @@ class Player:
         """Badge indexes of the gyms still standing, Hoenn order."""
         return [i for i in range(S.BADGE_COUNT) if not self.g.flag(S.FLAG_BADGE01 + i)]
 
+    def next_boss(self) -> str | None:
+        """The first unbeaten post-game boss by rowe_rom.BOSSES order once the game-clear bit is up, None
+        before the clear or w/ both down; the six every post-clear scorer aims at."""
+        if not self.g.flag(S.FLAG_SYS_GAME_CLEAR):
+            return None
+        return next((n for n, m in zip(rowe_rom.BOSSES, planner.POSTGAME) if not self.g.flag(BOSSES[m][0])), None)
+
     def scoring_builds(self) -> tuple:
         """(core builds, next leader's build or None): every remaining leader at the badge count it will
         be fought at in ladder order, then the League at LEAGUE_BADGES, each as foe type pairs. Past
@@ -2053,7 +2211,7 @@ class Player:
             return
         floor = min(m.level for m in party)
         team = [mon_profile(m, floor, self.g.iv_boosts()) for m in party]
-        self.wanted = wanted_types(team, self.scoring_builds()[0])
+        self.wanted = wanted_catch_types(team, self.scoring_builds()[0])
 
     def teach_tms(self) -> None:
         """On the field after the PC at a heal visit: each bag TM that closes a wanted type goes on the
@@ -2067,6 +2225,23 @@ class Player:
             print(f"tm: {rowe_rom.item_name(tms[pocket_slot][0])} {rowe_rom.move(move).name} on {mon.nickname} over "
                   f"{rowe_rom.move(mon.moves[forget]).name} -> {ok}", flush=True)
         self.refresh_wanted()
+
+    def plan_tm_trip(self) -> None:
+        """After the bag TMs are taught: the Department Store TMs tm_assignments would teach, within
+        the money past the reserve, set the trek to Lilycove. Each 4F clerk opens its full list only
+        w/ its badge-reward flag set, the stub otherwise. Not on the League leg, where every counter
+        is Victory Road walked back."""
+        party = self.g.party()
+        if not party or self._league_leg():
+            self.tm_wants, self.tm_trek = [], False
+            return
+        clerks = [((x, y), max(lists, key=len) if all(self.g.flag(f) for f in flags) else min(lists, key=len))
+                  for x, y, flags, lists in rowe_rom.clerk_marts(*DEPT_STORE_4F)]
+        self.tm_wants = tm_shopping(party, self.g.iv_boosts(), self.g.tms(), self.g.money(), clerks, self.scoring_builds()[0])
+        self.tm_trek = bool(self.tm_wants)
+        if self.tm_wants:
+            print(f"tm trip: {[(t, [rowe_rom.item_name(i) for i, _ in rows]) for t, rows in self.tm_wants]}, "
+                  f"money {self.g.money()}", flush=True)
 
     def teach_egg_moves(self) -> None:
         """At the blue nurse after the PC and the TMs: egg moves that close a wanted type, TEACH_EGG_BP
@@ -2155,6 +2330,7 @@ class Player:
         self.fill_party()
         self.do_pc_swap()
         self.teach_tms()
+        self.plan_tm_trip()
         self.teach_egg_moves()
 
     def grind_wild_top(self) -> int | None:
@@ -2163,6 +2339,70 @@ class Player:
             return None
         span = rowe_rom.wild_land_levels().get(tuple(self.goal.get("map", ())))
         return span[1] if span else None
+
+    def fossil_step(self, here: tuple) -> None:
+        """One step of the revive errand. A party of six first frees a slot per fossil at the Rustboro
+        Center PC (back slots, never the lead), then the walk goes Rustboro, Devon 1F, Devon 2F and
+        the scientist revives the first fossil in the bag. A revive that comes back short counts toward
+        planner.FOSSIL_FAIL_CAP, which check_goal turns into a GoalExit so the planner moves on."""
+        fossils = self.g.fossils()
+        if not fossils:
+            raise GoalExit("goal reached: every fossil revived")
+        town, devon_1f, devon_2f = planner.RUSTBORO, planner.DEVON_1F, planner.DEVON_2F
+        surf = "SURF" in self.field_moves()
+        if len(self.g.party()) >= PARTY_SIZE:
+            if here not in SERVICE_MAPS[town]:
+                self.travel_toward(town, self._door_tiles(town, SERVICE[town][0]))
+                return
+            room = min(len(fossils), PARTY_SIZE - 1)
+            r = self.errands.heal_at(town, SERVICE[town][0], after_heal=lambda: self._free_slots(room), surf=surf)
+            print(f"fossil room -> {r}, party {len(self.g.party())} at {self.g.position()}", flush=True)
+            return
+        if here in SERVICE_MAPS[town] - {town}:
+            print(f"leave building {here} -> {self.errands.leave_by_warp(town)}", flush=True)
+            return
+        if here not in (town, devon_1f, devon_2f):
+            self.travel_toward(town, self._door_tiles(town, devon_1f))
+            return
+        if here != devon_2f:
+            dest = devon_1f if here == town else devon_2f
+            print(f"enter {dest} -> {self.errands.enter_warp(dest, surf=surf)} at {self.g.position()}", flush=True)
+            return
+        r = self.errands.revive_fossil_at()
+        if r != "revived":
+            self._fossil_fails += 1
+        self.say(f"fossil revive -> {r}, party {[m.nickname for m in self.g.party()]}, fossils left {len(self.g.fossils())}")
+
+    def _free_slots(self, n: int) -> None:
+        """Inside the Center after the nurse: deposit the last n party mons so the reviver has room."""
+        for _ in range(n):
+            party = self.g.party()
+            if len(party) <= 1 or not self.errands.deposit_at_pc(len(party) - 1):
+                return
+
+    def maybe_repel(self) -> None:
+        """At the start of a travel or explore leg, fire a Repel when the party out-levels the current
+        map's wild max, so a walk past low wilds pays no encounters. Guarded on an inactive repel
+        (VAR_REPEL_STEP_COUNT 0), so the bag reopens only on a fresh leg or after one wears off. A
+        repel that just wore off leaves a "use another?" yes/no on the field, answered Yes in place
+        rather than through the bag."""
+        if self.g.var(S.VAR_REPEL_STEP_COUNT):
+            return
+        span = rowe_rom.wild_land_levels().get(tuple(self.g.position()[2:]))
+        party = [m for m in self.g.party() if m.level]
+        repels = self.g.repels()
+        if not span or not party or min(m.level for m in party) <= span[1] or not repels:
+            return
+        if self.e.read(S.FIELD_LOCKED, 1)[0]:
+            self.tap(eb.KEY_A)
+            self.run(30)
+            if self.g.var(S.VAR_REPEL_STEP_COUNT):
+                self.say(f"repel re-used, party over wild L{span[1]}")
+                return
+        held = dict(repels)
+        slot = next(i for i, (iid, _) in enumerate(self.g.items()) if iid in held)
+        if self.errands.use_item_in_field(slot) and self.g.var(S.VAR_REPEL_STEP_COUNT):
+            self.say(f"repel on, party over wild L{span[1]}")
 
     def do_pc_swap(self) -> None:
         """Inside a Center after the heal, one heal visit on the ledger: a core swap when the budget is
@@ -2184,7 +2424,7 @@ class Player:
         ivs = self.g.iv_boosts()
         team = [mon_profile(m, floor, ivs) for m in party]
         core_builds, nxt = self.scoring_builds()
-        self.wanted = wanted_types(team, core_builds)
+        self.wanted = wanted_catch_types(team, core_builds)
         top = self.grind_wild_top()
         if top is not None:
             box = [bm for bm in box if rowe_rom.level_from_exp(bm.species, bm.experience) >= top - LEVEL_CUTOFF
@@ -2198,7 +2438,15 @@ class Player:
         movable = [i for i in range(len(team)) if not ledger.locked(party[i].personality)]
         plan, kind = None, "core"
         if ledger.core_open():
-            plan = best_swap(team, pool, core_builds, [i for i in movable if i != flex], core_margin(team, core_builds), levels)
+            boss = self.next_boss()
+            if boss is not None:
+                # past the clear the one fight left is the next boss's six, so the swap runs the damage
+                # formula on every member and box mon at the party top against them, no level cutoff:
+                # the cap is the party top and the grind trains the pick there
+                plan = best_boss_swap(party, [(bm.slot, bm, box_level[bm.slot]) for bm in box], max(m.level for m in party),
+                                      ivs, boss_foes(boss), movable, BOSS_SWAP_MARGIN)
+            else:
+                plan = best_swap(team, pool, core_builds, [i for i in movable if i != flex], core_margin(team, core_builds), levels)
         if plan is None and nxt is not None and flex in movable and not ledger.flex_hold(party[flex].personality, badges):
             kind = "flex"
             cap = self.goal.get("cap") or top or floor
@@ -2299,7 +2547,14 @@ class Player:
                 if c.direction in (rowe_map.DIR_DIVE, rowe_map.DIR_EMERGE):
                     status = self.errands.take_dive(c.direction, surf=surf, tools=self.field_moves())
                 else:
-                    status = self.errands.cross_edge(c.direction, surf=surf, rank=edge_rank, tools=self.field_moves())
+                    # a border several maps share crosses into hop only along the stretch the
+                    # connection offset puts inside hop's own width or height
+                    gw = region_route.grid(hop)
+                    span = None
+                    if gw is not None:
+                        size = gw[1] if c.direction in (rowe_map.DIR_NORTH, rowe_map.DIR_SOUTH) else gw[2]
+                        span = (c.offset, c.offset + size)
+                    status = self.errands.cross_edge(c.direction, surf=surf, rank=edge_rank, tools=self.field_moves(), span=span)
                 how = f"dir {c.direction}"
                 break
         else:
@@ -2332,6 +2587,8 @@ class Player:
                                                 approach=ferry_obj["approach"],
                                                 surf=surf, tools=self.field_moves())
                 how = "ferry" if ferry_label is not None else "door"
+                if how == "door":
+                    self._script_cross = (here, hop)
             elif hop in rowe_rom.dive_script_edges().get(here, set()):
                 # here and hop are linked by a setdivewarp the ROM connection table never carries
                 # (Sootopolis (0,7) <-> underwater (24,5)). Surfacing from the seabed emerges on a B
@@ -2557,6 +2814,11 @@ class Player:
             # routing must see; ROM map-edge connections alone miss a warp-only onward map
             if self.graph is not None:
                 self.graph.observe(here, list(exits))
+                if self.graph.unblock(region[:2], hop):
+                    self._stuck_hits.pop(self._stuck_key(region[:2], hop, self.field_moves()), None)
+                    self._save_stuck_hits()
+                    print(f"gate dropped: {list(region[:2])} -> {list(hop)} crossed", flush=True)
+            self._script_cross = None
             # a landing area w/ no way on except back across this border is a dead end for the
             # area it was entered from, whatever the rest of the map connects to: Route 104's
             # north half enters Petalburg on a pond-locked corner that reaches no door and no
@@ -2913,39 +3175,49 @@ class Player:
         print(f"grind: no reachable grass on {list(here)} from {(x, y)}, waiting", flush=True)
         self.run(60)
 
-    def collectable_balls(self) -> list:
-        """Uncollected item balls on this map the grid can reach a side of, nearest first,
-        skipping any whose pickup already failed this run and any with no collected flag."""
+    def collectable_items(self) -> list:
+        """(x, y, flag, kind, elevation) of the uncollected items on this map the grid can reach a
+        side of, nearest first: the item balls off the live header and the hidden-item BgEvents off
+        the ROM header, a hidden item picked up the same way, face the tile and press A. A hidden
+        item answers only from a side at its own elevation (Route 78's Stardust sits on a ledge at
+        3 and an A press from the path at 1 does nothing), so a side counts only at that height;
+        a ball's elevation is None, its object lookup already failing across the gap at the press.
+        Skips any whose pickup already failed this run and any ball with no collected flag."""
         x, y, group, num = self.g.position()
         here = (group, num)
         surf = "SURF" in self.field_moves()
-        reach = self._grid().reachable((x, y), surf)
+        grid = self._grid()
+        reach = grid.reachable((x, y), surf)
+        placed = [(bx, by, flag, "ball", None) for bx, by, flag in rowe_map.item_balls(self.e)]
+        placed += [(hx, hy, S.FLAG_HIDDEN_ITEMS_START + fid, "hidden", elev or None)
+                   for hx, hy, _item, fid, elev in rowe_rom.hidden_items(group, num)]
         out = []
-        for bx, by, flag in rowe_map.item_balls(self.e):
+        for bx, by, flag, kind, elev in placed:
             if not flag or self.g.flag(flag) or (here, bx, by) in self._item_skip:
                 continue
-            if any((bx + dx, by + dy) in reach for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0))):
-                out.append((bx, by, flag))
+            sides = [(bx + dx, by + dy) for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0))]
+            if any(s in reach and (elev is None or grid.cell(*s) >> S.GRID_ELEVATION_SHIFT == elev) for s in sides):
+                out.append((bx, by, flag, kind, elev))
         out.sort(key=lambda b: abs(b[0] - x) + abs(b[1] - y))
         return out
 
     def collect_step(self) -> bool:
-        """Detour to the nearest reachable uncollected item ball and pick it up, so the goal
-        resumes next step. False when none is reachable, leaving the goal to run this step. A
-        ball whose pickup does not flip its flag (a side that would not open, a press that took
-        nothing) is skipped for the rest of the run so the detour cannot loop on it; a wild
-        battle on the way is no verdict on the ball, so the next step walks at it again (Route
-        121's three balls were each skipped after one interrupted walk and left on the ground)."""
-        balls = self.collectable_balls()
-        if not balls:
+        """Detour to the nearest reachable uncollected item and pick it up, so the goal resumes
+        next step. False when none is reachable, leaving the goal to run this step. An item whose
+        pickup does not flip its flag (a side that would not open, a press that took nothing) is
+        skipped for the rest of the run so the detour cannot loop on it; a wild battle on the way
+        is no verdict on the item, so the next step walks at it again (Route 121's three balls
+        were each skipped after one interrupted walk and left on the ground)."""
+        items = self.collectable_items()
+        if not items:
             return False
         here = self.g.position()[2:]
-        bx, by, flag = balls[0]
-        r = self.errands.collect_item((bx, by), "SURF" in self.field_moves())
+        bx, by, flag, kind, elev = items[0]
+        r = self.errands.collect_item((bx, by), "SURF" in self.field_moves(), elev)
         got = self.g.flag(flag)
         if not got and r != "battle":
             self._item_skip.add((here, bx, by))
-        print(f"item: ball {(bx, by)} on {list(here)} -> {r}, collected {got}", flush=True)
+        print(f"item: {kind} {(bx, by)} on {list(here)} -> {r}, collected {got}", flush=True)
         return True
 
     def _observe_here(self, here: tuple) -> None:
@@ -2968,6 +3240,14 @@ class Player:
             raise GoalExit(DONE_EXIT)
         x, y, group, num = self.g.position()
         here = (group, num)
+        if here != self._hop_map:
+            # a hop sample is a map change on a travel or explore leg; a grind paces its grass border
+            # and logged 16 crossings under a second each in two minutes, which priced a hop at nothing.
+            # pace.json keeps the leg samples across runs, so a grind run still prices w/ real hops
+            now = time.time()
+            if self._hop_map is not None and self.goal.get("mode") in ("travel", "explore"):
+                self._hop_sec.append(now - self._hop_at)
+            self._hop_map, self._hop_at = here, now
         self._observe_here(here)
         slot = self.lowest_lead()
         if slot is not None and not self.need_heal and self.swap_failures < 3:
@@ -2977,8 +3257,11 @@ class Player:
             return
         if not self.need_heal and self.top_off_due(self.g.party()) and here in SERVICE_MAPS[self.service_town(here)]:
             self.need_heal = True
-        # a short party is a Center trip from anywhere; the boxes read only runs on the short party
-        if not self.need_heal and len(self.g.party()) < PARTY_SIZE and party_short(len(self.g.party()), len(self.g.boxes())):
+        # a short party is a Center trip from anywhere; the boxes read only runs on the short party.
+        # The revive errand opens that slot on purpose, so the refill waits until the fossils are spent
+        # (smoke on a live copy: deposit, refill, deposit again, 24 Center laps and no Devon visit)
+        if (not self.need_heal and len(self.g.party()) < PARTY_SIZE and party_short(len(self.g.party()), len(self.g.boxes()))
+                and not (self.goal.get("mode") == "errand" and self.g.fossils())):
             print(f"party {len(self.g.party())}/{PARTY_SIZE} w/ a boxed mon, Center trip to refill", flush=True)
             self.need_heal = True
         if not self.need_heal and self.state_path and os.path.exists(self.state_file("swap_order.json")):
@@ -3015,7 +3298,7 @@ class Player:
         if self.shopping:
             town = self.service_town(here, mart=True)
             if here in SERVICE_MAPS[town]:
-                bought = self.errands.restock_at(town, SERVICE[town][1], self.shopping, surf="SURF" in self.field_moves(), downgrade=HP_TIERS)
+                bought = self.errands.restock_at(town, SERVICE[town][1], self.shopping, surf="SURF" in self.field_moves(), downgrade=HP_TIERS + rowe_rom.item_sets()["BALL_TIERS"])
                 print(f"restock -> {bought} at {self.g.position()}", flush=True)
                 if bought == "battle":
                     return
@@ -3029,14 +3312,32 @@ class Player:
             if self.mart_trek:
                 self.travel_toward(town, self._door_tiles(town, SERVICE[town][1]))
                 return
+        if self.tm_trek:
+            if here == LILYCOVE or here in DEPT_STORE_CLIMB:
+                bought = self.errands.buy_tms_at_dept_store(self.tm_wants, surf="SURF" in self.field_moves())
+                print(f"tm trip -> {bought} at {self.g.position()}", flush=True)
+                if bought == "battle":
+                    return
+                # a floor or counter not reached drops the trek; the next heal visit re-plans it
+                self.tm_trek = False
+                if bought:
+                    self.teach_tms()
+                return
+            self.travel_toward(LILYCOVE, self._door_tiles(LILYCOVE, DEPT_STORE_CLIMB[0]))
+            return
         if self.scene_step(here) or self.league_step(here) or self.boss_step(here):
             return
         if self.collect_step():
             return
+        if self.goal.get("mode") == "errand":
+            self.fossil_step(here)
+            return
         if self.goal.get("mode") == "travel":
+            self.maybe_repel()
             self.travel_toward(tuple(self.goal.get("to", ())))
             return
         if self.goal.get("mode") == "explore":
+            self.maybe_repel()
             self.explore_step()
             return
         if self.goal.get("mode") == "gym":
@@ -3129,6 +3430,8 @@ class Player:
         # readable; an empty party off a field read is still the cutscene (the live crash was
         # lowest_lead on party[0] there)
         if self.g.in_battle() or (cb2 == S.CB2_OVERWORLD and self.g.party()):
+            self._menu_cb2 = None
+            self._menu_taps = 0
             if self._cutscene_cb2 is not None:
                 # Continue put the party somewhere new w/ the goal written before the ceremony;
                 # the exit makes replan snapshot this field and pick the post-game goal, else a
@@ -3136,6 +3439,29 @@ class Player:
                 self._cutscene_cb2 = None
                 raise GoalExit(f"continue: field back at {list(self.g.position()[2:])} after the credits, re-planning")
             return False
+        if cb2 in S.MENU_CB2 or self._menu_cb2 is not None:
+            # the Start menu and its screens: A opens the bag and the party list in turn (the live run
+            # sat 14 minutes there), B backs out to the field, through whatever fade callback the
+            # close passes through on the way
+            if cb2 != self._menu_cb2:
+                self._menu_cb2 = cb2
+                print(f"menu open: cb2 {cb2:#x}, backing out w/ B", flush=True)
+            self._menu_taps += 1
+            if self._menu_taps >= MENU_TAP_CAP:
+                # the menu is a script's and B never leaves it: gate the talk that opened it, so
+                # the explorer stops re-picking that door, and resume off the pre-menu snapshot
+                self._menu_cb2 = None
+                self._menu_taps = 0
+                if self._script_cross is not None and self.graph is not None:
+                    src, hop = self._script_cross
+                    self.graph.block(src, hop, self.field_moves(), reason="script_menu")
+                    print(f"script door {list(src)} -> {list(hop)} gated: its talk opened a menu B never leaves", flush=True)
+                self._script_cross = None
+                self.keep_state = True
+                raise GoalExit(f"menu stuck: {MENU_TAP_CAP} B presses at cb2 {cb2:#x} never reached the field, re-planning")
+            self.tap(eb.KEY_B)
+            self.run(30)
+            return True
         if cb2 != self._cutscene_cb2:
             self._cutscene_cb2 = cb2
             print(f"cutscene: cb2 {cb2:#x}, pressing A through it", flush=True)
@@ -3159,7 +3485,11 @@ class Player:
             return False
         r = self.errands.challenge_leader(BOSSES[here][1])
         print(f"boss: {list(here)} -> {r} at {self.g.position()[:2]}", flush=True)
-        if r != "battle":
+        if r == "battle":
+            self._last_boss = here
+            self._boss_fight = (time.time(), self.g.money())
+            self.record_boss_rematch(here)
+        else:
             self.dismiss_text()
         return True
 
@@ -3338,6 +3668,66 @@ class Player:
             self.record_closed_gym(gym, "loss")
             self.say(f"gym {list(gym)} closed after {n} losses, demoting on the ladder")
 
+    def _party_signature(self) -> list:
+        """[species, sorted move names] per party mon, sorted, the build a boss hold reopens on. A
+        level-up alone keeps the signature; a swapped mon or a relearned move changes it."""
+        return sorted([m.species, sorted(rowe_rom.move(mid).name for mid in m.moves if mid)]
+                      for m in self.g.party() if m.level)
+
+    def _boss_ledger(self) -> tuple[str, dict]:
+        """(path, {boss: entry}) of boss_losses.json. An entry is the whiteout count under the party
+        signature it was tallied against plus one attempt row per lost fight: fight-start epoch, whiteout
+        epoch, money before and after, and the epoch of the next fight against that boss, so the retry
+        cost is the measured whiteout-to-rematch span. A row written before attempts existed has none."""
+        path = os.path.join(os.path.dirname(self.state_path), "boss_losses.json")
+        data = {}
+        if os.path.exists(path):
+            with open(path) as f:
+                data = {tuple(e["boss"]): e for e in json.load(f)}
+        return path, data
+
+    def record_boss_loss(self, boss: tuple) -> int:
+        """Increment and persist this boss's whiteout count under the current party signature,
+        resetting to one when the signature changed since the last loss, and append the attempt row.
+        Returns the new count."""
+        path, data = self._boss_ledger()
+        sig = self._party_signature()
+        boss = tuple(boss)
+        prev = data.get(boss)
+        count = prev["count"] + 1 if prev and prev.get("signature") == sig else 1
+        start, money_before = self._boss_fight or (None, None)
+        self._boss_fight = None
+        attempts = (prev or {}).get("attempts", [])
+        attempts.append({"start": start, "whiteout": time.time(), "money_before": money_before,
+                         "money_after": self.g.money(), "rematch": None})
+        data[boss] = {"boss": list(boss), "count": count, "signature": sig, "attempts": attempts}
+        write_json(path, list(data.values()))
+        return count
+
+    def record_boss_rematch(self, boss: tuple) -> None:
+        """A boss fight opened: the last lost attempt against it that has no rematch yet gets this
+        fight's start as its rematch, closing the retry span."""
+        path, data = self._boss_ledger()
+        entry = data.get(tuple(boss))
+        if entry is None:
+            return
+        open_rows = [a for a in entry.get("attempts", []) if a["rematch"] is None]
+        if not open_rows:
+            return
+        open_rows[-1]["rematch"] = self._boss_fight[0]
+        write_json(path, list(data.values()))
+
+    def note_boss_loss(self, outcome: int) -> None:
+        """A whiteout against a post-game boss: tally it under the party-and-moves build and land the
+        attempt row. planner.recommend prices the losses against the coverage grind on the next plan,
+        so the same six are re-sent only while the measured retry is cheaper than the catch."""
+        boss = self._last_boss
+        if outcome not in (OUTCOME_LOST, OUTCOME_DREW) or boss is None or self.g.flag(BOSSES[boss][0]):
+            return
+        self._last_boss = None
+        n = self.record_boss_loss(boss)
+        self.say(f"whiteout vs boss {list(boss)}, loss {n}")
+
     def dismiss_text(self) -> None:
         """Close a leftover text box ("The Pokémon got away!") that blocks walking."""
         for _ in range(2):
@@ -3382,6 +3772,8 @@ class Player:
                                              flags=self._graph_flags(), tickets=self._tickets,
                                              hidden=self._gone_givers())
             self._stuck_hits = self._load_stuck_hits(os.path.join(states_dir, "stuck_hits.json"))
+            if self._pace_path is None:
+                self._load_pace(os.path.join(states_dir, "pace.json"))
         # points accrue at trainer-level milestones and the supervisor relaunches often enough
         # that a launch-time spend keeps them from piling up unspent; once per process, since
         # every in-process replan re-enters here and the menu trip w/ nothing to buy is a stall
@@ -3391,7 +3783,7 @@ class Player:
         if not self.g.in_battle():
             # a run that starts on the shore w/ a thin pocket walks to the counter before the
             # dungeon instead of waiting for its first battle to find the list
-            self._plan_shopping(self.g.party(), dict(self.g.poke_balls()).get(catch.POKE_BALL, 0))
+            self._plan_shopping(self.g.party(), catch.ball_count(dict(self.g.poke_balls())))
         while time.monotonic() < end and not self.stop:
             if self.state_path:
                 # the site holds each row until the stream frame it belongs to has played, so a
@@ -3440,7 +3832,8 @@ class Player:
                         print(f"CAUGHT {self.target.nickname} L{self.target.level}, party {len(self.g.party())}, balls {self.g.poke_balls()}", flush=True)
                     else:
                         self.note_gym_loss(outcome)
-                    balls = dict(self.g.poke_balls()).get(catch.POKE_BALL, 0)
+                        self.note_boss_loss(outcome)
+                    balls = catch.ball_count(dict(self.g.poke_balls()))
                     party = self.g.party()
                     self._plan_shopping(party, balls)
                     low = [m for m in party if m.hp * 100 < m.max_hp * HEAL_HP_PERCENT]
@@ -3454,6 +3847,7 @@ class Player:
                     mon = party[0]
                     ferry = " ".join(f"{f:03X}:{int(self.g.flag(f))}" for f in FERRY_FLAGS)
                     self.say(f"{self.wins}/{self.battles} won, {self.caught} caught, {mon.nickname} L{mon.level} {mon.hp}/{mon.max_hp} exp {mon.experience}, balls {balls}, badges {self.g.badges()}, map {self.g.position()[2:]}, ferry {ferry}")
+                    self._lead_exp.append((time.time(), mon.personality, mon.experience))
                     self.dismiss_text()
                     # the bag's HP items cover the bench first, so the Center trip only fires when
                     # nothing in the Medicine pocket helps (or a mon fainted and needs a Revive); the

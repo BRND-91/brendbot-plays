@@ -9,7 +9,7 @@ import rowe_rom
 
 DODUO, MURKROW, SIGILYPH, SKARMORY, DRATINI, SWABLU = 84, 198, 561, 227, 147, 333
 VULPIX, FLETCHLING, SALANDIT, SCORBUNNY, HOUNDOUR, TORKOAL = 37, 661, 757, 813, 228, 324
-FLETCHINDER, SALAZZLE, CINDERACE = 662, 758, 815
+FLETCHINDER, SALAZZLE, CINDERACE, NINETALES = 662, 758, 815, 38
 INDEEDEE, FORM_1800, SOLROCK, LUNATONE = 876, 1800, 338, 337
 
 
@@ -24,8 +24,9 @@ def main() -> None:
     base = rowe_rom.LEADER_BASE_LEVEL[6]
     assert flannery == [(VULPIX, base), (FLETCHLING, base + 1), (SALANDIT, base + 2), (SCORBUNNY, base + 3), (TORKOAL, base + 4)], flannery
     assert HOUNDOUR not in [sp for sp, _ in flannery], "row 4 is skipped at count 5"
-    # Salandit's only step is EVO_LEVEL_FEMALE (16), which the EVO_LEVEL walk leaves alone
-    assert rowe_rom.leader_build("Flannery", 6) == [(VULPIX, 33), (FLETCHINDER, 34), (SALANDIT, 35), (CINDERACE, 36), (TORKOAL, 37)]
+    # Salandit's only step is EVO_LEVEL_FEMALE (16), which the EVO_LEVEL walk leaves alone; Vulpix
+    # carries ROWE's EVO_LEVEL_ALT row (39, 25, Ninetales) beside the Fire Stone row, so L33 is Ninetales
+    assert rowe_rom.leader_build("Flannery", 6) == [(NINETALES, 33), (FLETCHINDER, 34), (SALANDIT, 35), (CINDERACE, 36), (TORKOAL, 37)]
     assert rowe_rom.evolutions(SALANDIT) == ((16, 33, SALAZZLE),)
 
     pair = rowe_rom.leader_team("Tate&Liza", 5)

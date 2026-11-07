@@ -1,7 +1,7 @@
 """stats_at reproduces the game's stat formula on two fixture party mons whose six stats the save shows
 (catch_switch.ss slots 1 and 4, EVs off bytes 0x20, nature off personality, 0 skill levels), and
-species_at_level walks EVO_LEVEL rows only: Trubbish turns Garbodor at 36, Bulbasaur reaches Venusaur
-at 32, Vulpix stays Vulpix at any level since its rows are item and map gated."""
+species_at_level walks EVO_LEVEL and EVO_LEVEL_ALT rows: Trubbish turns Garbodor at 36, Bulbasaur
+reaches Venusaur at 32, Vulpix turns Ninetales at 25 on ROWE's level row beside the Fire Stone row."""
 import os
 import sys
 
@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rowe_rom
 
 FLETCHINDER, TRUBBISH, GARBODOR, BULBASAUR, IVYSAUR, VENUSAUR, VULPIX, MARILL, AZUMARILL = 662, 568, 569, 1, 2, 3, 37, 183, 184
+NINETALES = 38
 GREEDENT = 820
 NO_IVS = (0, 0, 0, 0, 0, 0)
 
@@ -25,7 +26,9 @@ def main() -> None:
     assert rowe_rom.species_at_level(TRUBBISH, 36) == GARBODOR
     assert rowe_rom.species_at_level(BULBASAUR, 16) == IVYSAUR
     assert rowe_rom.species_at_level(BULBASAUR, 32) == VENUSAUR
-    assert rowe_rom.species_at_level(VULPIX, 60) == VULPIX
+    assert rowe_rom.species_at_level(VULPIX, 24) == VULPIX
+    assert rowe_rom.species_at_level(VULPIX, 25) == NINETALES
+    assert rowe_rom.evolutions(VULPIX) == ((rowe_rom.EVO_LEVEL_ALT, 25, NINETALES), (7, 103, NINETALES))
     assert rowe_rom.species_at_level(MARILL, 18) == AZUMARILL
     assert rowe_rom.evolutions(MARILL) == ((rowe_rom.EVO_LEVEL, 18, AZUMARILL),)
 

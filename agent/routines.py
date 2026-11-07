@@ -26,6 +26,7 @@ MENU_ROW_POLL_FRAMES = 15
 MART_COUNTER_TILE = (3, 3)   # right of the counter end at (2,3), facing the clerk at (1,3) through
                              # it; the tile below the counter is an NPC's post in Mossdeep's Mart
 BOX_PC_STAND = (10, 3)       # tile below the storage PC on the shared Center layout, face up to boot it
+PARTY_FULL = 6               # the fossil reviver refuses a sixth party member ("too many Pokémon")
 PAD_FIRE_TICKS = 6          # 10-frame waits for a teleport pad to fire after the step onto it lands (20 measured)
 JACK_STAND = (4, 4)          # two below the blue nurse at (4, 2) on that layout, face up across the counter
 MOVE_UP, MOVE_DOWN = (0, -1), (0, 1)
@@ -35,6 +36,7 @@ STAND_FACING = {(0, 1): eb.KEY_UP, (0, -1): eb.KEY_DOWN, (1, 0): eb.KEY_LEFT, (-
 # 0x6d is MB_WATER_SOUTH_ARROW_WARP, the dive-tunnel current linking underwater maps (Sootopolis
 # (24,5) tile (9,8) -> (0,51)); it fires on a south press, same as the land south arrow 0x65.
 GATE_PRESSES = 8  # A presses through a door guard's script, the count that walked the League's guards aside on the lobby fixture
+SELL_PASS_CAP = 16  # sell passes per counter visit, above the distinct sellable stacks a bag can hold, so a stuck cursor ends the loop
 ARROW_WARP_KEYS = {0x62: eb.KEY_RIGHT, 0x63: eb.KEY_LEFT, 0x64: eb.KEY_UP, 0x65: eb.KEY_DOWN,
                    0x6d: eb.KEY_DOWN}
 
@@ -114,6 +116,12 @@ def landing_rank(hop: tuple, nxt: tuple | None, surf: bool = False, climb: bool 
     return rank, w, h
 
 
+LILYCOVE = (0, 5)
+# Lilycove Department Store 1F to 4F by the stairs, the TM floor last; every hop is a concrete warp
+DEPT_STORE_CLIMB = ((13, 16), (13, 17), (13, 18), (13, 19))
+DEPT_STORE_COUNTER_GAP = 2  # a 4F clerk stands behind one counter row, so the buyer stands two tiles above it
+
+
 class Errands:
     def __init__(self, emu: eb.Emu, run: Callable[[int, int], None], log: Callable[[str], None] = print):
         self.e = emu
@@ -136,35 +144,39 @@ class Errands:
         self.run(8, key)
         self.run(12, 0)
 
-    def cross_edge(self, direction: int, surf: bool = False, rank: Callable | None = None, tools=frozenset()) -> str:
+    def cross_edge(self, direction: int, surf: bool = False, rank: Callable | None = None, tools=frozenset(),
+                   span: tuple | None = None) -> str:
         """Walk through the map connection in this direction; returns walk_to's status.
         With surf, a water edge the party can now cross counts as a reachable edge.
         `rank(edge_tile)` -> (class, -landing region size) keeps class-0 tiles only and
         orders them biggest landing region first; a map split into regions (Petalburg's
         pond-locked northwest) otherwise takes the nearest tile and lands the walk where
-        its next hop is unreachable."""
+        its next hop is unreachable. `span` is (lo, hi) along the border, the stretch that
+        leads into the intended neighbour when several maps share this edge."""
         # a current ride can set the surfer down somewhere the chosen edge tile no longer
         # reaches (Route 133's belts end on a shoal), so a walk that moved and then lost its
         # goal picks a fresh edge tile from where it landed
         status, pos = "unreachable", None
         while status == "unreachable" and pos != self.g.position()[:2]:
             pos = self.g.position()[:2]
-            status = self._cross_edge_once(direction, surf, rank, tools)
+            status = self._cross_edge_once(direction, surf, rank, tools, span)
         return status
 
-    def _cross_edge_once(self, direction: int, surf: bool, rank: Callable | None, tools=frozenset()) -> str:
+    def _cross_edge_once(self, direction: int, surf: bool, rank: Callable | None, tools=frozenset(),
+                         span: tuple | None = None) -> str:
         grid = Grid(self.e)
         grid.tools = tools
         x, y, *_ = self.g.position()
         w, h = grid.width - 2 * S.MAP_OFFSET, grid.height - 2 * S.MAP_OFFSET
+        lo, hi = span if span is not None else (0, max(w, h))
         if direction == rowe_map.DIR_NORTH:
-            goals = [(cx, -1) for cx in range(w)]
+            goals = [(cx, -1) for cx in range(w) if lo <= cx < hi]
         elif direction == rowe_map.DIR_SOUTH:
-            goals = [(cx, h) for cx in range(w)]
+            goals = [(cx, h) for cx in range(w) if lo <= cx < hi]
         elif direction == rowe_map.DIR_WEST:
-            goals = [(-1, cy) for cy in range(h)]
+            goals = [(-1, cy) for cy in range(h) if lo <= cy < hi]
         else:
-            goals = [(w, cy) for cy in range(h)]
+            goals = [(w, cy) for cy in range(h) if lo <= cy < hi]
         # reachable() walks the same steps path() does, and it includes a margin tile a current
         # delivers the surfer to (Route 133's belts into Route 134) that passable() refuses
         reach = grid.reachable((x, y), surf)
@@ -439,6 +451,20 @@ class Errands:
               f"rows {sorted(self._menu_rows().items())}", flush=True)
         return "stuck"
 
+    def _face_object(self, obj: tuple, approach: tuple) -> None:
+        """Turn toward `obj` from `approach`, a tile on one axis from it. A counter NPC is talked to
+        from two tiles away, so facing comes off the axis sign rather than the adjacent-only
+        STAND_FACING lookup talk_warp uses."""
+        dx, dy = obj[0] - approach[0], obj[1] - approach[1]
+        if dx == 0 and dy != 0:
+            face = eb.KEY_UP if dy < 0 else eb.KEY_DOWN
+        elif dy == 0 and dx != 0:
+            face = eb.KEY_LEFT if dx < 0 else eb.KEY_RIGHT
+        else:
+            raise ValueError(f"approach {approach} is not on one axis from {obj}")
+        self.run(8, face)
+        self.run(8, 0)
+
     def talk_menu(self, obj: tuple, path: list, approach: tuple | None = None, presses: int = 8) -> str:
         """Drive a native multichoice NPC down a nested `path` of on-screen row labels, one label per
         menu level, to a leaf action such as the island clerk's ticket handout. Walk to `approach`,
@@ -456,17 +482,7 @@ class Errands:
         r = self.nav.walk_to(approach)
         if r != "arrived":
             return r
-        # a counter NPC is approached from a tile two away on one axis, so facing comes off the axis
-        # sign rather than the adjacent-only STAND_FACING lookup talk_warp uses
-        dx, dy = obj[0] - approach[0], obj[1] - approach[1]
-        if dx == 0 and dy != 0:
-            face = eb.KEY_UP if dy < 0 else eb.KEY_DOWN
-        elif dy == 0 and dx != 0:
-            face = eb.KEY_LEFT if dx < 0 else eb.KEY_RIGHT
-        else:
-            raise ValueError(f"approach {approach} is not on one axis from {obj}")
-        self.run(8, face)
-        self.run(8, 0)
+        self._face_object(obj, approach)
         src = self.map_id()
         opened = False
         for _ in range(presses):
@@ -498,6 +514,64 @@ class Errands:
             self.run(20, 0)
         return "done" if not self.e.read(S.FIELD_LOCKED, 1)[0] else "stuck"
 
+    def revive_fossil_at(self, obj: tuple = rowe_rom.FOSSIL_REVIVER[3:5], presses: int = 10) -> str:
+        """On Devon Corp 2F w/ a party under six and a fossil in the Items pocket: talk to the scientist,
+        A takes Yes on "bring a Fossil back to life?", and the picker is a native multichoice of every
+        fossil name (Dome Fossil first, Cancel last), so the row matching the first fossil in the bag
+        is stepped to and taken; a row for a fossil not held answers "It doesn't look like you have that
+        fossil" and reopens the list. Then B through the handover, since B advances text and declines
+        a nickname prompt. FIELD_LOCKED drops to 0 between this script's boxes, so the walk ends on the
+        party growing, never on the lock. Returns "revived" when the party grew and the fossil left the
+        bag, "no_fossil" w/ none in the bag, "no_room" on a full party, "no_menu" when the greeting
+        never opened, "no_picker" when the fossil list never showed the wanted row, "no_mon" when the
+        pick gave no party member, else walk_to's status."""
+        fossils = self.g.fossils()
+        if not fossils:
+            return "no_fossil"
+        party_before = self.g.party_filled()
+        if party_before >= PARTY_FULL:
+            return "no_room"
+        approach = self._approach_tile(obj)
+        if approach is None:
+            return "unreachable"
+        r = self.nav.walk_to(approach)
+        if r != "arrived":
+            return r
+        self._face_object(obj, approach)
+        want = rowe_rom.item_name(fossils[0][0])
+        src = self.map_id()
+        opened = picked = False
+        for _ in range(presses):
+            self.tap(eb.KEY_A)
+            self.run(45, 0)
+            if self.map_id() != src:
+                break
+            if not self.e.read(S.FIELD_LOCKED, 1)[0]:
+                continue
+            opened = True
+            row = next((idx for idx, text in self._menu_rows().items() if text == want), None)
+            if row is not None:
+                for _ in range(row):
+                    self.tap(eb.KEY_DOWN)
+                    self.run(18, 0)
+                self.tap(eb.KEY_A)
+                self.run(90, 0)
+                picked = True
+                break
+        if not opened:
+            return "no_menu"
+        if not picked:
+            return "no_picker"
+        for _ in range(presses * 2):
+            self.tap(eb.KEY_B)
+            self.run(45, 0)
+            if self.g.party_filled() > party_before and not self.e.read(S.FIELD_LOCKED, 1)[0]:
+                break
+        after = self.g.party_filled()
+        left = len(self.g.fossils())
+        self.log(f"fossil revive {want}: party {party_before} -> {after}, fossils {len(fossils)} -> {left}")
+        return "revived" if after > party_before and left < len(fossils) else "no_mon"
+
     def peek_menu(self, obj: tuple, approach: tuple | None = None, presses: int = 8) -> "dict | str":
         """Open a native multichoice NPC's menu, read its rows, and B out without selecting, so a
         clerk whose top menu is native-built can be decoded off the live run without risking a handout
@@ -510,15 +584,7 @@ class Errands:
         r = self.nav.walk_to(approach)
         if r != "arrived":
             return r
-        dx, dy = obj[0] - approach[0], obj[1] - approach[1]
-        if dx == 0 and dy != 0:
-            face = eb.KEY_UP if dy < 0 else eb.KEY_DOWN
-        elif dy == 0 and dx != 0:
-            face = eb.KEY_LEFT if dx < 0 else eb.KEY_RIGHT
-        else:
-            raise ValueError(f"approach {approach} is not on one axis from {obj}")
-        self.run(8, face)
-        self.run(8, 0)
+        self._face_object(obj, approach)
         src = self.map_id()
         opened = False
         for _ in range(presses):
@@ -979,6 +1045,19 @@ class Errands:
         self.log(f"pc withdraw box {box_slot} (page {box_slot // S.PC_IN_BOX}): landed box {landed}, party {before} -> {after}")
         return after > before
 
+    def deposit_at_pc(self, out_slot: int) -> bool:
+        """Inside a Center: boot the storage PC, deposit the party mon at out_slot, close the PC. True
+        when the party shrank."""
+        cb_field = self.g.callback2()
+        if not self._open_pc():
+            return False
+        before = len(self.g.party())
+        self._deposit(out_slot, before)
+        self._close_pc(cb_field)
+        after = len(self.g.party())
+        self.log(f"pc deposit slot {out_slot}: party {before} -> {after}")
+        return after < before
+
     def heal_at(self, town: tuple, center: tuple, after_heal: Callable[[], None] | None = None, surf: bool = False) -> str:
         """From the town or its Center: reach the Center, heal, come back out. Returns 'healed',
         'battle' on a wild interruption, or 'unreachable' when the Center warp cannot be walked to
@@ -1211,19 +1290,21 @@ class Errands:
             resync()
         return "exhausted"
 
-    def collect_item(self, ball: tuple, surf: bool = False) -> str:
-        """Walk to a tile beside the item ball, face it and press A to pick it up. Returns
-        walk_to's status short of the ball, "battle" on a wild interruption, "unreachable" when
-        no side is open, or "got" once the pickup dialog is dismissed. The caller reads the
-        collected flag to confirm the pickup."""
+    def collect_item(self, ball: tuple, surf: bool = False, elev: int | None = None) -> str:
+        """Walk to a tile beside the item, face it and press A to pick it up. Returns walk_to's
+        status short of the item, "battle" on a wild interruption, "unreachable" when no side is
+        open, or "got" once the pickup dialog is dismissed. The caller reads the collected flag to
+        confirm the pickup. `elev` is a hidden item's event elevation, the height the stand must
+        hold for the game to answer the press. The face is a 2-frame press: a hidden item sits on
+        a walkable tile, and the 8-frame tap that only turns toward a ball steps onto it."""
         grid = Grid(self.e)
         x, y, *_ = self.g.position()
-        for stand, key in self.stand_tiles(grid, ball, (x, y), surf):
+        for stand, key in self.stand_tiles(grid, ball, (x, y), surf, elev):
             r = self.nav.walk_to(stand, surf=surf)
             if r != "arrived":
                 return r
-            self.tap(key)
-            self.run(10, 0)
+            self.run(2, key)
+            self.run(12, 0)
             for _ in range(12):
                 if self.g.in_battle():
                     # the grab woke a wild encounter. keep mashing A and it walks through the
@@ -1241,23 +1322,24 @@ class Errands:
         return "unreachable"
 
     @staticmethod
-    def stand_tiles(grid: Grid, ball: tuple, origin: tuple, surf: bool) -> list:
-        """(stand tile, facing key) for each land side of the ball the player can walk to. A water
+    def stand_tiles(grid: Grid, ball: tuple, origin: tuple, surf: bool, elev: int | None = None) -> list:
+        """(stand tile, facing key) for each land side of the item the player can walk to. A water
         side is out: the surfer's elevation is the water's and the ball's is its bank's, and the
         game's object lookup (ObjectEventDoesZCoordMatch) skips an object across that gap, so the
-        A press from the water did nothing and the ball kept the one landing tile."""
-        elev = grid.cell(*origin) >> S.GRID_ELEVATION_SHIFT
+        A press from the water did nothing and the ball kept the one landing tile. W/ `elev`, a
+        hidden item's event elevation, only a side at that height counts (GetBgEventAt)."""
+        own = grid.cell(*origin) >> S.GRID_ELEVATION_SHIFT
         out = []
         for d, key in STAND_FACING.items():
             stand = (ball[0] + d[0], ball[1] + d[1])
-            if grid._is_water(*stand):
+            if grid._is_water(*stand) or (elev is not None and grid.cell(*stand) >> S.GRID_ELEVATION_SHIFT != elev):
                 continue
-            if grid.passable(*stand, elev, origin, surf) and grid.path(origin, stand, surf) is not None:
+            if grid.passable(*stand, own, origin, surf) and grid.path(origin, stand, surf) is not None:
                 out.append((stand, key))
         return out
 
     def _held(self, item_id: int) -> int:
-        return dict(self.g.poke_balls() + self.g.medicine()).get(item_id, 0)
+        return dict(self.g.poke_balls() + self.g.medicine() + self.g.tms()).get(item_id, 0)
 
     def buy_at_counter(self, stand: tuple, wants: list, face: int = eb.KEY_LEFT, downgrade: tuple = ()) -> dict | None:
         """Inside a shop map: walk to `stand`, face the clerk, buy the list. None when the stand or
@@ -1338,10 +1420,14 @@ class Errands:
                 bought = {}
                 if self.nav.walk_to(MART_COUNTER_TILE) != "arrived":
                     self.log(f"restock: counter tile {MART_COUNTER_TILE} not reached from {self.g.position()[:2]}")
-                elif not self.open_buy_list():
-                    self.log("restock: Buy list not opened at the counter")
                 else:
-                    bought = self.buy_from_list(wants, downgrade)
+                    sold = self.sell_at_counter()
+                    if sold:
+                        self.log(f"restock: sold {sold}, money {self.g.money()}")
+                    if not self.open_buy_list():
+                        self.log("restock: Buy list not opened at the counter")
+                    else:
+                        bought = self.buy_from_list(wants, downgrade)
                 r = self.leave_by_warp(town)
                 self.log(f"leave mart -> {r}")
                 return bought
@@ -1353,6 +1439,105 @@ class Errands:
                 return "battle"
             self.run(60, 0)
         return None
+
+    def buy_tms_at_dept_store(self, wants: list, surf: bool = False):
+        """From Lilycove or a Department Store floor: climb the stairs to 4F, buy each clerk's
+        (item id, qty) list from the tile above its counter, come back down and out to town. A clerk
+        is faced down across the counter row. The elevator at (2,1) is never stepped on: its room's
+        only warps are dynamic, so the graph has no edge out of it and a run saved inside re-entered
+        it until the dynamic-interior exit was written. Returns {item id: bought} once every counter
+        was worked, "battle" when a wild fight cuts the town walk in, None when a floor or a counter
+        was not reached."""
+        here = self.map_id()
+        if here == LILYCOVE:
+            r = self.enter_warp(DEPT_STORE_CLIMB[0], surf=surf)
+            self.log(f"dept store: enter -> {r} at {self.g.position()[:2]}")
+            if r == "battle":
+                return r
+            if r != "map_changed":
+                return None
+            # the door mat sits below the floor's elevation, the same step-off the Mart needs
+            self.run(24, eb.KEY_UP)
+            self.run(20, 0)
+        elif here not in DEPT_STORE_CLIMB:
+            self.log(f"dept store: unknown map {here}")
+            return None
+        for dest in DEPT_STORE_CLIMB[DEPT_STORE_CLIMB.index(self.map_id()) + 1:]:
+            r = self.take_warp(dest)
+            self.log(f"dept store: stairs up -> {dest} {r}")
+            if r != "map_changed":
+                return None
+        bought = {}
+        for (x, y), rows in wants:
+            got = self.buy_at_counter((x, y - DEPT_STORE_COUNTER_GAP), rows, face=eb.KEY_DOWN)
+            if got is None:
+                return None
+            bought.update(got)
+        for dest in reversed(DEPT_STORE_CLIMB[:-1]):
+            r = self.take_warp(dest)
+            self.log(f"dept store: stairs down -> {dest} {r}")
+            if r != "map_changed":
+                return None
+        self.log(f"dept store: leave -> {self.leave_by_warp(LILYCOVE)}")
+        return bought
+
+    def sell_at_counter(self, face: int = eb.KEY_LEFT) -> dict:
+        """At the Mart counter facing the clerk: pick Sell off the greeting menu and sell every stack in
+        the Items pocket that SELLABLE_ITEMS covers, at its full quantity, then back out to the field.
+        Returns {item id: sold}. The sell bag opens on the last field pocket, so it shoulder-tabs to the
+        Items pocket first. Each sale is the item A to the quantity box, the quantity raised to the
+        stack, then three A's for the confirm, the yes on the price prompt, and the sold line, so the
+        next DOWN registers; the pocket repacks after a sale, so the first remaining sellable is taken
+        each pass. An empty sellable list skips the greeting, which lets restock_at call this on every
+        visit without a wasted clerk trip."""
+        sell_ids = rowe_rom.item_sets()["SELLABLE_ITEMS"]
+        if not self.g.sellables():
+            return {}
+        cb_field = self.g.callback2()
+        self.run(8, face)
+        self.run(8, 0)
+        for _ in range(2):
+            self.tap(eb.KEY_A)
+            self.run(60, 0)
+        self.tap(eb.KEY_DOWN)   # Buy is the default row, Sell sits below it
+        self.run(25, 0)
+        self.tap(eb.KEY_A)
+        self.run(60, 0)
+        sold = {}
+        if self.g.callback2() != S.CB2_BAG_MAIN:
+            self.log("sell: sell bag never opened off the clerk menu")
+        else:
+            self.bag_to_pocket(S.BAG_POCKET_ITEMS)
+            for _ in range(SELL_PASS_CAP):
+                items = self.g.items()
+                tgt = next((i for i, (iid, _) in enumerate(items) if iid in sell_ids), None)
+                if tgt is None:
+                    break
+                iid, qty = items[tgt]
+                cur = self.g.bag_position()[1]
+                for _ in range(abs(tgt - cur)):
+                    self.tap(eb.KEY_DOWN if tgt > cur else eb.KEY_UP)
+                    self.run(12, 0)
+                self.tap(eb.KEY_A)
+                self.run(45, 0)
+                for _ in range((qty - 1) // 10):
+                    self.tap(eb.KEY_RIGHT)
+                    self.run(10, 0)
+                for _ in range((qty - 1) % 10):
+                    self.tap(eb.KEY_UP)
+                    self.run(10, 0)
+                for _ in range(3):
+                    self.tap(eb.KEY_A)
+                    self.run(60, 0)
+                got = qty - dict(self.g.items()).get(iid, 0)
+                sold[iid] = sold.get(iid, 0) + got
+                self.log(f"sell: item {iid} x{qty} -> +{got}, money {self.g.money()}")
+        for _ in range(6):
+            if self.g.callback2() == cb_field and not self.e.read(S.FIELD_LOCKED, 1)[0]:
+                break
+            self.tap(eb.KEY_B)
+            self.run(45, 0)
+        return sold
 
     def party_cursor_to(self, slot: int) -> None:
         """Party menu is two columns (even slots left, odd right), three rows."""
@@ -1681,6 +1866,43 @@ class Errands:
             self.run(40, 0)
         done = self.g.callback2() == cb_field
         self.log(f"field heal slot {target_slot}: bag {opened}, field {done}")
+        return opened and done
+
+    def use_item_in_field(self, pocket_slot: int) -> bool:
+        """From the overworld: Start menu > Bag > Items pocket > the item at pocket_slot > Use, for an
+        item that applies with no target such as a Repel. A takes Use off the item's box, the effect
+        text plays, and B walks back out to the field. True when the bag opened and the field is
+        reached again; the caller reads VAR_REPEL_STEP_COUNT to confirm the repel took."""
+        cb_field = self.g.callback2()
+        for _ in range(2):
+            self.tap(eb.KEY_B)
+            self.run(20, 0)
+        self.tap(eb.KEY_START)
+        self.run(60, 0)
+        self._start_menu_to(S.START_MENU_BAG)
+        self.tap(eb.KEY_A)
+        self.run(120, 0)
+        opened = self.g.callback2() == S.CB2_BAG_MAIN
+        if opened:
+            self.bag_to_pocket(S.BAG_POCKET_ITEMS, settle=20)
+            for _ in range(pocket_slot + 8):
+                cur = self.g.bag_position()[1]
+                if cur == pocket_slot:
+                    break
+                self.tap(eb.KEY_DOWN if cur < pocket_slot else eb.KEY_UP)
+                self.run(10, 0)
+            # A raises the item's Use/Toss/Cancel box, A again takes Use at the top and plays the effect
+            self.tap(eb.KEY_A)
+            self.run(40, 0)
+            self.tap(eb.KEY_A)
+            self.run(90, 0)
+        for _ in range(8):
+            if self.g.callback2() == cb_field:
+                break
+            self.tap(eb.KEY_B)
+            self.run(40, 0)
+        done = self.g.callback2() == cb_field
+        self.log(f"field item slot {pocket_slot}: bag {opened}, field {done}")
         return opened and done
 
     def back_to_route_101(self) -> str:

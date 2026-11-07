@@ -115,10 +115,20 @@ hidden-grass encounters through the Shaking Tool. Menu cursors take the short wa
   turns them into Tyrunt, Amaura and Omanyte, and Tyrantrum (Rock/Dragon, Atk 278) scored 51 foes hit
   super effectively, above Flygon's 46, w/ no wild spawn at all. A fossil in the bag is a roster
   candidate the catch policy never sees; rule: revive on the first Rustboro visit.
-- BP farms. Gym trainers rebattle without limit after the leader rematch (guide FAQ 10), and the Blue
-  Nurse's PC storage battle fights the player's own boxed mons for EXP, BP and trainer points (FAQ 23),
-  so six L100s in Box 1 are a grind partner w/ no walking. Bonus Battle and XP Boost - Trainer go
-  ahead of Gold Rush in the skill order, since BP buys the mints, capsules and tutors.
+- BP farms, deferred. Gym trainers rebattle without limit after the leader rematch (guide FAQ 10), and
+  the Blue Nurse's PC storage battle fights whatever sits in Box 1 slots 1-6 (FAQ 23). Admin call: the
+  grind stays in the wild, since grass is where catches happen, and six L100s against a fresh team is a
+  whiteout. Neither farm is driven; reconsider once the roster is built. Bonus Battle and XP Boost -
+  Trainer still go ahead of Gold Rush in the skill order, since BP buys the mints, capsules and tutors.
+- Catching. `catch_chance` takes a ball multiplier no caller passes, so every chance the executor sees
+  is a Poké Ball chance, and a L100 Haxorus at 1 HP tops out under the 25% throw floor, which is the
+  chip-then-kill pattern: the chip turn lands, the next turn finds no safe chip and no chance over the
+  floor, and the fallback is max damage. 1538 soften lines in `states/grind.log` against 0 caught.
+  Rules: the shopping list carries Ultra Balls once the balance clears them and the chance is computed
+  on the strongest ball held; a chip turn already spent means the next turn throws at the best chance
+  on the table instead of falling to max damage; a status move (sleep x2, paralysis x1.5) outranks a
+  chip. The all-badges early return in `catch_plan` gates on the roster plan's wanted list, since the
+  rebuild run catches at 16 badges.
 - Boss losses cost 5000 each (330658 to 325658 to 320658 across the three Steven fights) and the
   planner re-sends the same six without a cap, where gyms hold at GYM_LOSS_CAP. Rule: two losses to a
   boss hold the goal until the party or its moves change.

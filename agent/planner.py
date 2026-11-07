@@ -18,6 +18,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import battle_engine  # noqa: E402
 import map_graph  # noqa: E402
 import rowe_rom  # noqa: E402
 import script_decode  # noqa: E402
@@ -42,7 +43,12 @@ GYM_STAND = {(11, 3): (5, 3), (4, 1): (13, 10)}
 JOHTO_GYM = {(2, 7): 8, (2, 8): 9, (2, 9): 10, (2, 10): 11, (2, 11): 12, (2, 12): 13, (2, 13): 14, (2, 15): 15}
 ALL_GYMS = {**GYM_BADGE, **JOHTO_GYM}
 GYM_CLOSED = os.path.join(STATES, "gym_closed.json")
+BOSS_LOSSES = os.path.join(STATES, "boss_losses.json")
 PARTY_SIZE = 6
+# The boss retry in minutes, the measured median off the attempt ledger w/ this cold-start stand-in
+# before a span exists; the reason line names the default when it is priced.
+RETRY_MINUTES_DEFAULT = 20  # whiteout to the next fight start: the Center warp and the walk back to the boss room
+CATCH_MARGIN = 0.5          # summed boss edge a catchable species must beat the weakest member by, same bar as the Center swap
 
 # vanilla pokeemerald IndoorEverGrande group 16, index for index: the Elite Four chambers, the
 # connecting halls, the League entry floor, the Hall of Fame, and the two link-club rooms.
@@ -145,15 +151,54 @@ def grind_map(graph: map_graph.MapGraph, blocked: frozenset, anchor: tuple, cap:
     return list(min(routes, key=rank))
 
 
+def catch_target(graph: map_graph.MapGraph, blocked: frozenset, here: tuple, boss: str, caught: frozenset,
+                 moves: frozenset, ivs: tuple, level: int) -> tuple | None:
+    """(edge, species, map) for the uncaught land species on a reachable walked map that would score the
+    highest boss_edge against `boss` once raised to `level` (battle_engine.Prospect), the nearest map
+    by hops between its spawns; None when every reachable species is caught. The damage formula on the
+    prospect's own learnset, so a Teddiursa that becomes an Earthquake Ursaluna outranks a Wurmple
+    underfoot and a Dark type that merely hits Steel on the chart."""
+    hops = hops_from(here, graph, moves)
+    foes = battle_engine.boss_foes(boss)
+    best = None
+    seen = {}
+    for group, num, category, _slot, _lo, _hi, species in rowe_rom.wild_encounters():
+        m = (group, num)
+        if category != 0 or m not in graph.visited or m in blocked or m not in hops:
+            continue
+        if species in caught or rowe_rom.species_at_level(species, level) in caught:
+            # the ledger records the form the ball closed on, Ursaluna for Teddiursa's slot at L52
+            continue
+        if species not in seen:
+            seen[species] = battle_engine.boss_edge(battle_engine.Prospect(species, level), level, ivs, foes)
+        key = (seen[species], -hops[m])
+        if best is None or key > best[0]:
+            best = (key, species, m)
+    return (round(best[0][0], 2), best[1], best[2]) if best else None
+
+
 def blocked_grinds(status: dict) -> frozenset:
-    """Maps the executor gave up grinding on, from its `grind blocked` exits, persisted in
-    states/grind_blocked.json so the next launch does not send it straight back."""
+    """Maps the executor gave up grinding on, persisted in states/grind_blocked.json so the next
+    launch does not send it straight back: the map it stood on at a `grind blocked` exit, and the
+    grind goal's grass at a `travel stuck` exit whose failed destination is that grass, since only
+    that walk proved the grass unreachable. A stuck on a heal detour or on the first hop out of a
+    wedged map says nothing about the grass; blocking it on every such exit burned 43 maps while the
+    party stood on (1,62) with its one onward gate shut."""
     maps = set()
     if os.path.exists(BLOCKED):
         with open(BLOCKED) as f:
             maps = {tuple(m) for m in json.load(f)}
-    if status.get("exit_reason", "").startswith("grind blocked") and tuple(status["map"]) not in maps:
-        maps.add(tuple(status["map"]))
+    reason = status.get("exit_reason", "")
+    goal = status.get("goal") or {}
+    target = None
+    if reason.startswith("grind blocked"):
+        target = tuple(status["map"])
+    elif reason.startswith("travel stuck") and goal.get("mode") == "grind" and goal.get("map"):
+        grass = list(goal["map"])
+        if f"to {grass}" in reason or f"-> {grass}" in reason:
+            target = tuple(grass)
+    if target is not None and target not in maps:
+        maps.add(target)
         with open(BLOCKED + ".tmp", "w") as f:
             json.dump(sorted(list(m) for m in maps), f)
         os.replace(BLOCKED + ".tmp", BLOCKED)
@@ -200,6 +245,34 @@ def still_closed(status: dict, graph: "map_graph.MapGraph") -> set:
         if not reopened:
             shut.add(tuple(e["gym"]))
     return shut
+
+
+def party_signature(status: dict) -> list:
+    """[species, sorted move names] per party mon, sorted, the build a boss hold is measured against.
+    Matches Player._party_signature so a stored hold compares equal to the live party after the JSON
+    round trip."""
+    return sorted([m["species"], sorted(mv["name"] for mv in m["moves"])]
+                  for m in status.get("party", []))
+
+
+def boss_losses(status: dict, boss: tuple) -> tuple:
+    """(losses under the current party signature, measured retry minutes or None) for `boss` off the
+    attempt ledger. The retry is the median whiteout-to-rematch span over the attempts that have a
+    rematch, so one span left open across a night's relaunch does not price every retry at hours.
+    A ledger entry tallied under another build counts zero: the swap or relearn is the change the
+    losses were waiting on, and the first fight under a new build is free."""
+    if not os.path.exists(BOSS_LOSSES):
+        return 0, None
+    with open(BOSS_LOSSES) as f:
+        entries = {tuple(e["boss"]): e for e in json.load(f)}
+    entry = entries.get(tuple(boss))
+    if entry is None:
+        return 0, None
+    spans = sorted((a["rematch"] - a["whiteout"]) / 60 for a in entry.get("attempts", []) if a.get("rematch") is not None)
+    retry = spans[len(spans) // 2] if spans else None
+    count = entry["count"] if entry.get("signature") == party_signature(status) else 0
+    return count, retry
+
 
 
 def hops_from(start: tuple, graph: "map_graph.MapGraph | None" = None, moves: frozenset = frozenset()) -> dict:
@@ -314,12 +387,21 @@ def sevii_goal(graph: map_graph.MapGraph, moves: frozenset, status: dict) -> tup
     return {"mode": "explore", "to": list(gym), "cap": None}, f"no route or unvisited frontier toward {leader} {list(gym)}, shut gates {shut}"
 
 
+RUSTBORO = (0, 3)
+DEVON_1F, DEVON_2F = (11, 0), (11, 1)  # Devon Corp; the fossil scientist is on 2F, through 1F's stairs
+FOSSIL_FAIL_CAP = 2  # revive attempts that came back short before the errand is dropped for the run
+
+
 def recommend(status: dict, graph: map_graph.MapGraph) -> tuple:
     """(goal dict, reason)"""
     badges = status.get("badges", 0)
     graph.cur_badges = badges
-    cap = CAPS[badges] if badges < len(CAPS) else CAPS[-1]
     party = status["party"]
+    cap = CAPS[badges] if badges < len(CAPS) else CAPS[-1]
+    if status.get("champion") and party:
+        # CAPS tops out at 45, so past the clear no member ever reads under it and a mid-60s catch would
+        # march on the L100 bosses as caught; the cap is the party's own top level until every member is there
+        cap = max(m["level"] for m in party)
     attackers = [m for m in party if any(mv["power"] >= 10 and mv["pp"] for mv in m["moves"])]
     low = min((m["level"] for m in attackers), default=0)
     here = tuple(status["map"])
@@ -335,7 +417,14 @@ def recommend(status: dict, graph: map_graph.MapGraph) -> tuple:
         # by hops and demotes a gym the ladder recorded closed, sending the party to the wrong island)
         goal, note = sevii_goal(graph, frozenset(status.get("field_moves", [])), status)
         return goal, f"at cap {cap}, {badges} badges, {note}"
-    if len(party) < PARTY_SIZE or low < cap:
+    fossils = status.get("fossils", [])
+    if fossils and status.get("fossil_fails", 0) < FOSSIL_FAIL_CAP:
+        # a fossil in the bag is a roster candidate the catch policy never sees, so the revive goes
+        # ahead of the grind as soon as Rustboro is on the known map
+        moves = frozenset(status.get("field_moves", []))
+        if here in (RUSTBORO, DEVON_1F, DEVON_2F) or graph.route(here, RUSTBORO, field_moves=moves) is not None:
+            return {"mode": "errand", "errand": "revive_fossil", "to": list(RUSTBORO)}, f"{len(fossils)} fossil(s) in the bag, Devon Corp revives them"
+    if len(party) < PARTY_SIZE or (low < cap and not status.get("champion")):
         grass = grind_map(graph, blocked, anchor, cap)
         return {"mode": "grind", "map": grass, "cap": cap}, f"party {len(party)}/6, lowest attacker L{low} vs cap {cap}, grind {grass} toward {list(anchor)}"
     if not unbeaten:
@@ -345,11 +434,29 @@ def recommend(status: dict, graph: map_graph.MapGraph) -> tuple:
             bosses = [m for m, beaten in zip(POSTGAME, flags) if not beaten]
             if not bosses:
                 return {"mode": "done"}, "champion, every badge in, the League and the post-game bosses cleared, no goal left"
-            boss = bosses[0]
             moves = frozenset(status.get("field_moves", []))
+            boss = bosses[0]
+            losses, retry = boss_losses(status, boss)
+            retry_min = RETRY_MINUTES_DEFAULT if retry is None else retry
+            price = f"boss {list(boss)} {losses} losses x {retry_min:g} min{' default' if retry is None else ''} = {losses * retry_min:g} min"
+            # a catch that out-scores the weakest member against the boss's six comes before the fight,
+            # whatever the retries cost: the party that lost is the sunk cost, and the swap at the next
+            # Center brings the catch in (best_boss_swap). The grind ends on the catch (check_goal).
+            caught = frozenset(status.get("caught_species", []))
+            edges = [m.get("boss_edge") for m in party]
+            if all(e is not None for e in edges):
+                target = catch_target(graph, blocked, here, rowe_rom.BOSSES[POSTGAME.index(boss)], caught, moves,
+                                      tuple(status.get("iv_boosts", (0,) * 6)), cap)
+                if target is not None and target[0] >= min(edges) + CATCH_MARGIN:
+                    edge, species, grass = target
+                    return ({"mode": "grind", "map": list(grass), "cap": None, "coverage": True, "caught_n": len(caught), "species": species},
+                            f"champion, {price}, catch {rowe_rom.species_name(species)} on {list(grass)}, edge {edge} vs weakest {min(edges)}")
+            if low < cap:
+                grass = grind_map(graph, blocked, anchor, cap)
+                return {"mode": "grind", "map": grass, "cap": cap}, f"champion, {price}, lowest attacker L{low} vs cap {cap}, grind {grass} toward {list(anchor)}"
             if here == boss or graph.route(here, boss, field_moves=moves) is not None:
-                return {"mode": "travel", "to": list(boss)}, f"champion, boss travel to {list(boss)}"
-            return {"mode": "explore", "to": list(boss), "cap": None}, f"champion, no route to boss {list(boss)} under moves {sorted(moves)}, exploring toward it"
+                return {"mode": "travel", "to": list(boss)}, f"champion, {price}, boss travel to {list(boss)}"
+            return {"mode": "explore", "to": list(boss), "cap": None}, f"champion, {price}, no route to boss {list(boss)} under moves {sorted(moves)}, exploring toward it"
         moves = frozenset(status.get("field_moves", []))
         # every gym down, all 16 League flags in: advance the endgame chain to the first map not
         # yet reached that there is a walkable route to from here, so arrival at (0,8) travels on into

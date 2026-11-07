@@ -26,6 +26,10 @@ class _G:
     def badges():
         return 8
 
+    @staticmethod
+    def key_items():
+        return []
+
 
 class _Errands:
     def __init__(self, result):
@@ -41,9 +45,13 @@ class _Graph:
     def __init__(self):
         self.cur_badges = 0
         self.world = {}
+        self.gate_reason = {}
 
     def route(self, *a, **k):
         return None
+
+    def passable(self, node, blocked=frozenset(), field_moves=frozenset()):
+        return set()
 
     def explore_hop(self, *a, **k):
         return None
@@ -86,6 +94,7 @@ def main() -> None:
         pt = _player("map_changed")
         pt._gyms = set()
         pt._last_hop = None
+        pt._bounced = {}
         pt.graph = _Graph()
         pt.goal = {"mode": "travel", "to": [0, 79]}
         pt.region = lambda: (1, 5, (13, 22))

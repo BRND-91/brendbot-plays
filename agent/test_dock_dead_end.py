@@ -23,6 +23,9 @@ class _Graph:
     def observe(self, here: tuple, neighbors: list) -> list:
         return []
 
+    def unblock(self, here: tuple, neighbor: tuple) -> bool:
+        return False
+
 
 def _player(landed: tuple, exits: set, graph) -> play.Player:
     p = play.Player.__new__(play.Player)

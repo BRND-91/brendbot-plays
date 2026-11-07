@@ -7,6 +7,7 @@ against SaveBlock1 so an interrupted walk (wild battle, NPC in the way) is
 detected at the step it happened.
 """
 import struct
+import time
 from collections import deque
 from typing import Callable
 
@@ -105,6 +106,7 @@ class Grid:
     tools = frozenset()  # field tools the party holds; a clearable tile passes only w/ its tool
     clearable = {}       # read-only empty default for a grid built w/o object events (from_cells,
                          # the synthetic test fixtures); a live grid assigns its own in __init__
+    pushable = frozenset()  # same default for Strength boulders; only a live grid's own set is pushed
     e = None
     # the player's tile and the height the game holds for it, read off the object event so a
     # BFS from a multi-level tile (a surfer under the bridge) starts at the real carried height
@@ -480,6 +482,10 @@ class Grid:
             for nxt, d in self._steps(cur, carried, start, surf, boulders):
                 if nxt in self.warp_tiles and nxt != goal:
                     continue
+                # a margin cell belongs to the neighbouring map and stepping on it fires the map
+                # change, so it is a goal (the edge crossing) and never a waypoint
+                if not self.inside(*nxt) and nxt != goal:
+                    continue
                 key = (nxt, self._carry(nxt, carried, surf), self._after_push(cur, d, boulders))
                 if key in prev:
                     continue
@@ -690,6 +696,12 @@ class Navigator:
                     nxt = (cur[0] + d[0], cur[1] + d[1])
                     if nxt in refused:
                         dead.add(nxt)
+                        # the game refused a step the grid allows, twice; the save at that
+                        # moment holds whatever stood on the tile, which a later copy cannot
+                        path = f"/tmp/rowe_dead_step_{int(time.time())}"
+                        with open(path + ".ss", "wb") as f:
+                            f.write(self.e.save_state())
+                        print(f"dead step {cur} -> {nxt} on {here}: state {path}.ss", flush=True)
                     refused.add(nxt)
                     break
         x, y, *_ = self.g.position()

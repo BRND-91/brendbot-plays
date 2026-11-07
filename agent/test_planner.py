@@ -16,7 +16,7 @@ def _status(map_id, badges, beaten, cap_level=21, party=6, johto=()):
         "badges": badges,
         "badge_flags": [g in beaten for g in range(8)],
         "johto_flags": [g in johto for g in range(8)],
-        "party": [{"level": cap_level, "moves": [{"name": "Tackle", "power": 40, "pp": 10}]}
+        "party": [{"species": 1, "level": cap_level, "moves": [{"name": "Tackle", "power": 40, "pp": 10}]}
                   for _ in range(party)],
         "map": list(map_id),
         "exit_reason": "",
@@ -195,9 +195,11 @@ def main() -> None:
         nxtgoal, nxtwhy = planner.recommend(nxt, gw)
         assert nxtgoal["mode"] == "travel" and nxtgoal["to"] == [24, 44], (nxtgoal, nxtwhy)
 
-        # champion (FLAG_SYS_GAME_CLEAR set by the Hall of Fame): League cleared, no goal left
+        # champion (FLAG_SYS_GAME_CLEAR set by the Hall of Fame) with every post-game boss beaten:
+        # no goal left. An open boss keeps the run going (test_boss_loss covers that branch).
         champ = _status((16, 11), 8, set(range(8)), cap_level=50, johto=set(range(8)))
         champ["champion"] = True
+        champ["boss_flags"] = [True] * len(planner.POSTGAME)
         champgoal, champwhy = planner.recommend(champ, gw)
         assert champgoal["mode"] == "done", (champgoal, champwhy)
 
@@ -267,7 +269,7 @@ def main() -> None:
         # from the badge table (Falkner, (2,7)) and route to it over the ferry, never nearest-by-hops
         st = {"map": [0, 79], "badges": 8, "field_moves": [],
               "badge_flags": [True] * 8, "johto_flags": [False] * 8,
-              "party": [{"level": 80, "moves": [{"power": 40, "pp": 10}]}] * 6}
+              "party": [{"species": 1, "level": 80, "moves": [{"name": "Tackle", "power": 40, "pp": 10}]}] * 6}
         fdv, gpv = tempfile.mkstemp(suffix=".json")
         os.close(fdv)
         os.remove(gpv)

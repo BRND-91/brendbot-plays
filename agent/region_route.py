@@ -166,14 +166,16 @@ def portals(m: tuple) -> tuple:
             if gd is None:
                 continue
             _, dw_, dh_ = gd
+            # a border several maps share is split by offset: a tile crosses into dest only where
+            # its shifted coordinate lands inside dest's own width or height
             if d == rowe_map.DIR_NORTH:
-                pairs = {(x, 0): (x - off, dh_ - 1) for x in range(w)}
+                pairs = {(x, 0): (x - off, dh_ - 1) for x in range(w) if 0 <= x - off < dw_}
             elif d == rowe_map.DIR_SOUTH:
-                pairs = {(x, h - 1): (x - off, 0) for x in range(w)}
+                pairs = {(x, h - 1): (x - off, 0) for x in range(w) if 0 <= x - off < dw_}
             elif d == rowe_map.DIR_WEST:
-                pairs = {(0, y): (dw_ - 1, y - off) for y in range(h)}
+                pairs = {(0, y): (dw_ - 1, y - off) for y in range(h) if 0 <= y - off < dh_}
             else:
-                pairs = {(w - 1, y): (0, y - off) for y in range(h)}
+                pairs = {(w - 1, y): (0, y - off) for y in range(h) if 0 <= y - off < dh_}
             out.append(Portal("edge", dest, {t: l for t, l in pairs.items() if walkable(g, t)}, d))
         elif d == rowe_map.DIR_DIVE and g._behavior is not None:
             tiles = [t for t in _all_walkable(m) if g._behavior(g.cell(*t) & S.GRID_ID_MASK) in DIVE_BEHAVIORS]

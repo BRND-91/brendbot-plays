@@ -350,6 +350,73 @@ def item_price(item_id: int) -> int:
     return struct.unpack_from("<H", _rom(), ITEMS_OFFSET + item_id * ITEM_STRIDE + ITEM_PRICE)[0]
 
 
+@lru_cache(maxsize=1)
+def _item_ids() -> dict:
+    """{name.lower(): id} over every item row, the first id winning a name a later row repeats,
+    except the one duplicate the table carries (id 1 and id 4 both read "Poké Ball"; id 1 prices
+    at 0, a dead slot, so the priced row at id 4 wins and matches catch.POKE_BALL)."""
+    out = {}
+    for i in range(1, ITEM_COUNT):
+        key = item_name(i).lower()
+        if not key:
+            continue
+        if key not in out:
+            out[key] = i
+        elif item_price(out[key]) == 0 and item_price(i) > 0:
+            out[key] = i
+    return out
+
+
+def item_id(name: str) -> int:
+    ids = _item_ids()
+    key = name.lower()
+    if key not in ids:
+        raise KeyError(f"item not in the ROM's name table: {name}")
+    return ids[key]
+
+
+_SELLABLE_NAMES = ("Star Piece", "Nugget", "Big Pearl", "Big Mushroom", "Stardust", "Pearl", "Tiny Mushroom",
+                    "Rare Bone", "Big Nugget", "Balm Mushroom", "Comet Shard", "Pretty Wing", "Shoal Salt",
+                    "Shoal Shell")  # Heart Scale pays the move relearner, never sold
+_FOSSIL_NAMES = ("Helix Fossil", "Dome Fossil", "Old Amber", "Root Fossil", "Claw Fossil", "Skull Fossil",
+                  "Armor Fossil", "Cover Fossil", "Plume Fossil", "Jaw Fossil", "Sail Fossil")
+_REPEL_NAMES = ("Repel", "Super Repel", "Max Repel")
+_REPEL_STEP_VALUES = (100, 200, 250)
+_BALL_TIER_NAMES = ("Poké Ball", "Great Ball", "Ultra Ball")
+_BALL_MULT_VALUES = (1.0, 1.5, 2.0)
+
+
+@lru_cache(maxsize=1)
+def item_sets() -> dict:
+    """SELLABLE_ITEMS, FOSSIL_ITEMS, REPEL_ITEMS/REPEL_STEPS and BALL_TIERS/BALL_MULT, item ids
+    resolved off the ROM's own name table. A name the ROM lacks is dropped from its set rather
+    than raising, since the sellable and fossil lists are drawn from the vanilla item pool and
+    ROWE need not carry every one of them."""
+    sellable, dropped_sellable = [], []
+    for n in _SELLABLE_NAMES:
+        try:
+            sellable.append(item_id(n))
+        except KeyError:
+            dropped_sellable.append(n)
+    fossils, dropped_fossils = [], []
+    for n in _FOSSIL_NAMES:
+        try:
+            fossils.append(item_id(n))
+        except KeyError:
+            dropped_fossils.append(n)
+    repels = [item_id(n) for n in _REPEL_NAMES]
+    balls = [item_id(n) for n in _BALL_TIER_NAMES]
+    return {
+        "SELLABLE_ITEMS": frozenset(sellable),
+        "FOSSIL_ITEMS": frozenset(fossils),
+        "REPEL_ITEMS": tuple(repels),
+        "REPEL_STEPS": dict(zip(repels, _REPEL_STEP_VALUES)),
+        "BALL_TIERS": tuple(balls),
+        "BALL_MULT": dict(zip(balls, _BALL_MULT_VALUES)),
+        "DROPPED": tuple(dropped_sellable + dropped_fossils),
+    }
+
+
 def tm_move(item_id: int) -> int:
     """Move the TM or HM teaches, 0 on an unused id in the span."""
     if not ITEM_TM01 <= item_id < ITEM_TM01 + TM_MOVES_COUNT:
@@ -973,7 +1040,7 @@ def metatile_behavior(group: int, num: int):
 # The first struct carrying a leader's name is the gym fight; later ones at 0x40 steps are rematches.
 TRAINER_STRUCT_SIZE = 0x40
 TRAINER_NAME_OFF, TRAINER_PARTY_OFF, TRAINER_COUNT_OFF = 4, 40, 60
-TRAINER_ROW_SIZE, TRAINER_ROW_SPECIES = 40, 10
+TRAINER_ROW_SIZE, TRAINER_ROW_SPECIES, TRAINER_ROW_MOVES = 40, 10, 18  # four u16 move ids per row
 # leader base level per badge count, fitted on the logged fights: Roxanne 16 at 1, Norman 20 at 2,
 # Wattson 23 at 3, Winona 26 at 4, Tate & Liza 29-30 at 5. CAPS - 6 from 2 badges on, CAPS - 5 at 1.
 LEADER_CAPS = [16, 21, 26, 29, 32, 36, 39, 42, 45]
@@ -988,18 +1055,29 @@ LEAGUE = ["Sidney", "Phoebe", "Glacia", "Drake", "Wallace"]
 LEAGUE_BADGES = 8
 
 
-def _encode_text(s: str) -> bytes:
+_PUNCT_ENCODE = {v: k for k, v in _PUNCT.items()}
+
+
+def _encode_text(s: str, terminate: bool = True) -> bytes:
+    """The game's charmap encode of `s`, 0xFF-terminated unless `terminate` is False for a
+    substring search where the match may sit mid-string."""
     out = []
     for c in s:
         if c.isupper():
             out.append(0xBB + ord(c) - 65)
         elif c.islower():
             out.append(0xD5 + ord(c) - 97)
+        elif c.isdigit():
+            out.append(0xA1 + ord(c) - 48)
+        elif c == " ":
+            out.append(0x00)
         elif c == "&":
             out.append(0x2D)
+        elif c in _PUNCT_ENCODE:
+            out.append(_PUNCT_ENCODE[c])
         else:
-            raise ValueError(f"unencodable trainer name char {c!r}")
-    return bytes(out) + b"\xff"
+            raise ValueError(f"unencodable text char {c!r}")
+    return bytes(out) + (b"\xff" if terminate else b"")
 
 
 @lru_cache(maxsize=None)
@@ -1057,6 +1135,16 @@ def boss_build(name: str) -> list:
     rom = _rom()
     po = _fo(struct.unpack_from("<I", rom, trainer_struct(name) + TRAINER_PARTY_OFF)[0])
     return [(sp, rom[po + j * TRAINER_ROW_SIZE]) for j, sp in enumerate(pool)]
+
+
+def boss_mons(name: str) -> list:
+    """[(species, level, moves)] a post-game boss fields, the four move ids off each row, so a scorer
+    can run the damage formula against the six as fielded instead of against their type pairs."""
+    pool = trainer_pool(name)
+    rom = _rom()
+    po = _fo(struct.unpack_from("<I", rom, trainer_struct(name) + TRAINER_PARTY_OFF)[0])
+    return [(sp, rom[po + j * TRAINER_ROW_SIZE], struct.unpack_from("<4H", rom, po + j * TRAINER_ROW_SIZE + TRAINER_ROW_MOVES))
+            for j, sp in enumerate(pool)]
 
 
 # the 8 Sevii-island leaders giving badges 9-16 (flags rowe_symbols.JOHTO_BADGE01 onward); their
@@ -1271,6 +1359,31 @@ def _script_item_given(addr: int) -> int | None:
     return None
 
 
+def hidden_items(group: int, num: int) -> list:
+    """(x, y, item, flag_id, elevation) of each hidden-item BgEvent on the map, flag_id the 12-bit
+    offset the game adds to FLAG_HIDDEN_ITEMS_START once the player searches the tile out. The
+    event answers an A press only from a tile at its elevation (GetBgEventAt), 0 meaning any."""
+    h = map_header(group, num)
+    if h is None:
+        return []
+    ev = struct.unpack_from("<I", _rom(), h + MAPHDR_EVENTS)[0]
+    if not _in_rom(ev):
+        return []
+    cnt = _rom()[_fo(ev) + MAPEVENTS_BG_COUNT]
+    p = struct.unpack_from("<I", _rom(), _fo(ev) + MAPEVENTS_BG_PTR)[0]
+    if not _in_rom(p) or not _in_rom(p + cnt * BG_STRIDE):
+        return []
+    out = []
+    for i in range(cnt):
+        o = _fo(p) + i * BG_STRIDE
+        if _rom()[o + 5] != BG_HIDDEN_ITEM_KIND:
+            continue
+        x, y = struct.unpack_from("<hh", _rom(), o)
+        item = struct.unpack_from("<H", _rom(), o + 8)[0]
+        out.append((x, y, item, struct.unpack_from("<H", _rom(), o + 10)[0] & 0x0FFF, _rom()[o + 4]))
+    return out
+
+
 def field_items() -> list:
     """[(group, num, x, y, kind, item, flag)] for every item placed on a map. kind 'ball' is an
     object the player opens, its item read from the script, flag None. kind 'hidden' is a BgEvent
@@ -1338,6 +1451,67 @@ def _walk_script_ops(addr: int):
             a += 1 + _CMD_OPERAND_LEN[op]
 
 
+POKEMART_OP = 0x86
+
+
+def _item_list(fo: int) -> list:
+    """Item ids of a 0-terminated u16 shop list at a ROM file offset; a list runs 40 rows at most."""
+    ids = []
+    while len(ids) <= 40:
+        v = struct.unpack_from("<H", _rom(), fo)[0]
+        if v == 0:
+            break
+        ids.append(v)
+        fo += 2
+    return ids
+
+
+def clerk_marts(group: int, num: int) -> list:
+    """(x, y, flags, lists) per object on (group, num) whose script opens a Mart: the clerk's tile,
+    the flag ids its checkflag gates read, and the item-id list behind every pokemart command on any
+    branch. A gated clerk carries two lists, the full one behind the flag and the stub w/o it, so
+    the caller picks by the flag state (Lilycove 4F sells 13 attack TMs past badge 10, Swords Dance
+    alone before it)."""
+    rom = _rom()
+    out = []
+    for _i, x, y, _mv, addr in map_object_scripts(group, num):
+        flags, lists = [], []
+        for op, fa in _walk_script_ops(addr):
+            if op == CHECKFLAG_OP:
+                flags.append(struct.unpack_from("<H", rom, fa + 1)[0])
+            elif op == POKEMART_OP:
+                p = struct.unpack_from("<I", rom, fa + 1)[0]
+                if _in_rom(p):
+                    lists.append(_item_list(_fo(p)))
+        if lists:
+            out.append((x, y, flags, lists))
+    return out
+
+
+_SCR_LOADWORD, _SCR_MESSAGE = 0x0F, 0x67
+
+
+def script_texts(addr: int) -> list:
+    """Decoded text of every loadword (msgbox) and message operand reached from a script address, in
+    walk order, so a located NPC row is pinned by the line it speaks rather than by its address."""
+    rom = _rom()
+    out = []
+    for op, fa in _walk_script_ops(addr):
+        if op == _SCR_LOADWORD:
+            ptr = struct.unpack_from("<I", rom, fa + 2)[0]
+        elif op == _SCR_MESSAGE:
+            ptr = struct.unpack_from("<I", rom, fa + 1)[0]
+        else:
+            continue
+        if not _in_rom(ptr):
+            continue
+        start = _fo(ptr)
+        end = rom.find(b"\xff", start, start + 1000)
+        if end != -1:
+            out.append(_decode(rom[start:end]))
+    return out
+
+
 def _map_script_ptrs(group: int, num: int) -> list:
     """Script pointers in a map's map-script table: a bare u32 for most entry types, and the
     per-entry pointers inside the var-conditional tables (types 2 and 4)."""
@@ -1401,6 +1575,129 @@ def badge_gate_maps() -> list:
                         if fl in flag_badge:
                             hits.setdefault((g, num), set()).add(flag_badge[fl])
     return sorted((g, num, b) for (g, num), bs in hits.items() for b in bs)
+
+
+def text_refs(text: str) -> list:
+    """Every ROM address (0x08000000-based) where the encoded bytes of `text` occur, a bare
+    substring search w/ no terminator so a mid-string match (a word inside a paragraph) counts."""
+    rom = _rom()
+    needle = _encode_text(text, terminate=False)
+    out = []
+    i = rom.find(needle)
+    while i != -1:
+        out.append(i + ROM_BASE)
+        i = rom.find(needle, i + 1)
+    return out
+
+
+def _decoded_prefix(addr: int, text: str) -> bool:
+    """True when the string at `addr` is 0xFF-terminated within 200 bytes and its decoded form
+    starts with `text`."""
+    if not _in_rom(addr):
+        return False
+    rom = _rom()
+    fa = _fo(addr)
+    end = rom.find(b"\xff", fa, fa + 200)
+    if end == -1:
+        return False
+    return _decode(rom[fa:end]).startswith(text)
+
+
+def objects_by_dialogue(text: str, window: int = 0x400) -> list:
+    """(group, num, index, x, y, script_addr) for every map object whose event script's first
+    `window` bytes hold a little-endian pointer into `text`, found by a byte scan for pointer
+    operands rather than an opcode walk: applymovement and special sit outside _CMD_OPERAND_LEN,
+    so most NPC scripts would truncate before reaching a dialogue command."""
+    rom = _rom()
+    refs = set(text_refs(text))
+    out = []
+    for g in range(MAP_GROUP_COUNT):
+        for n in range(map_count(g)):
+            if map_header(g, n) is None:
+                continue
+            for idx, x, y, _mv, script in map_object_scripts(g, n):
+                if not _in_rom(script):
+                    continue
+                fa = _fo(script)
+                chunk = rom[fa:fa + window]
+                hit = False
+                for i in range(len(chunk) - 3):
+                    v = struct.unpack_from("<I", chunk, i)[0]
+                    if not _in_rom(v):
+                        continue
+                    if v in refs or _decoded_prefix(v, text):
+                        hit = True
+                        break
+                if hit:
+                    out.append((g, n, idx, x, y, script))
+    return out
+
+
+# Slateport City dock ferry, map (9,9) object 1 at tile (8,10): its "Where would you like to go?"
+# script sits 21 bytes from that text operand. multichoice_rows("Slateport City") reads its menu
+# Slateport City / Southern Island / Birth Island / Exit, the SS Tidal event-island run. This is
+# the ferry, not the town-to-town Flying Taxi; that service is free under the Fly Charm (item 837,
+# a passive charm whose field use does nothing) and no map-object script references its "Do you
+# need a lift?" text at 0x830A0E6, so the taxi dispatcher is unlocated by the dialogue tooling.
+SLATEPORT_FERRY_NPC = (9, 9, 1, 8, 10, 0x82F2354)
+# The Rustboro Devon Corp fossil scientist: map group 11 num 1 (Devon Corp 2F), object 5 at (14,8).
+# Its script asks "Would you like to bring a Fossil back to life?" (yes/no), refuses a party of six
+# ("Uh-oh, you've got too many Pokémon"), then "Please chose one of your fossils for me to revive."
+# opens the picker. Devon 1F object 2 at (5,3), 0x8284A49, is the Seal and Memory mart.
+FOSSIL_REVIVER = (11, 1, 5, 14, 8, 0x8284B7B)
+
+MENU_ACTION_STRIDE = 8  # struct MenuAction { const u8 *text; union func; }
+
+
+def _menu_walk(rom: bytes, ptr_off: int) -> list:
+    out = []
+    o = ptr_off
+    while True:
+        text_ptr = struct.unpack_from("<I", rom, o)[0]
+        if not _in_rom(text_ptr):
+            break
+        fa = _fo(text_ptr)
+        end = rom.find(b"\xff", fa, fa + 200)
+        if end == -1:
+            break
+        s = _decode(rom[fa:end])
+        if not s or "?" in s:
+            break
+        out.append(s)
+        o += MENU_ACTION_STRIDE
+    return out
+
+
+_MENU_TERMINAL_ROWS = ("Exit", "Cancel")
+
+
+def multichoice_rows(first_row_text: str) -> list:
+    """Decoded text of every MenuAction row in the table that opens on `first_row_text`: finds
+    every ROM occurrence of that text, every pointer to each occurrence, and walks each pointer's
+    location forward MENU_ACTION_STRIDE bytes at a time for as long as each entry's text pointer
+    is in ROM and decodes clean. These tables are packed back-to-back with no sentinel row, so a
+    walk that runs past a real table's end just keeps decoding into the next one; every genuine
+    table in this ROM ends on an Exit or Cancel row, so among the walks that end on one, the
+    shortest is kept, the one least likely to have walked on into a neighbor (`text` itself may
+    also repeat in the ROM beside a copy nothing points at, which text_refs still returns)."""
+    rom = _rom()
+    refs = text_refs(first_row_text)
+    if not refs:
+        raise ValueError(f"text not found in ROM: {first_row_text!r}")
+    candidates = []
+    for addr in refs:
+        needle = struct.pack("<I", addr)
+        ptr_off = rom.find(needle)
+        while ptr_off != -1:
+            rows = _menu_walk(rom, ptr_off)
+            if rows:
+                candidates.append(rows)
+            ptr_off = rom.find(needle, ptr_off + 1)
+    if not candidates:
+        raise ValueError(f"no pointer to {first_row_text!r} found in ROM")
+    terminated = [r for r in candidates if r[-1] in _MENU_TERMINAL_ROWS]
+    pool = terminated or candidates
+    return min(pool, key=len)
 
 
 def self_check() -> None:
