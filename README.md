@@ -21,12 +21,15 @@ the result live at live.brenergy.net.
 A supervisor (`agent/run-grind.sh`) relaunches one executor (`agent/play.py`) from a save state
 for a wall-clock budget. Before each launch `agent/planner.py` reads the executor's published
 status and writes the next goal: grind a grass map to the badge level cap, travel to a map,
-explore toward an unvisited one, fight a gym, run the League, or fight a post-game boss. The
-executor walks the overworld tile by tile, crosses maps by border, warp, dive, or a talked
-ferry, fights with moves ranked off the ROM's own damage tables, catches to fill the party,
-heals and restocks in service towns, builds the team from the PC box against the next leader,
-and solves the puzzle gyms from recorded routes. A goal reached is re-planned in-process so the
-stream never drops.
+explore toward an unvisited one, fight a gym, revive a fossil, run the League, fight a post-game
+boss, or grind the grass where a species spawns that would out-score the weakest member against
+that boss and catch it. The executor walks the overworld tile by tile, crosses maps by border,
+warp, dive, or a talked ferry, fights with moves ranked off the ROM's own damage tables, catches
+to fill the party, heals and restocks in service towns, sells loot and buys balls by tier at the
+Mart, picks up the item balls and hidden items on the maps it crosses, buys TMs at the Lilycove
+Department Store, runs Repel on a travel leg, builds the team from the PC box against the next
+leader, teaches it TMs and egg moves, and solves the puzzle gyms from recorded routes. A goal
+reached is re-planned in-process so the stream never drops.
 
 ## The nav map
 
@@ -35,7 +38,7 @@ stream never drops.
 ROM. The layout is force-directed, so a connected mesh means the maps link and a separate
 cluster means they do not.
 
-- **Green** is the 375 maps reachable from the party's start, the set the planner can path over.
+- **Green** is the 374 maps reachable from the party's start, the set the planner can path over.
 - **Red** is any map with no connection, warp, or dive edge into it from that set. The graph
   currently has none.
 - **Gold star** is a Hoenn gym entrance. All eight sit inside the green mesh.
@@ -53,9 +56,13 @@ event scripts and driven through their dialogue menus.
 
 16 badges, Champion. The run cleared the 8 Hoenn gyms, the 8 Johto leaders on the Sevii
 Islands, Victory Road, the Elite Four, and Wallace, and the Hall of Fame save restored through
-the title screen's Continue. The planner's remaining goals are the two post-game bosses, Steven
-in Meteor Falls and Red in Shoal Cave; after both it emits `done` and the supervisor stops.
-Per-fix findings are in `agent/HANDOFF.md`, the run log in `agent/PROGRESSION.md`.
+the title screen's Continue. The two post-game bosses, Steven in Meteor Falls and Red in Shoal
+Cave, are open. Steven has beaten the party three times under its current six, so the planner
+prices each retry off the measured whiteout-to-rematch span and, when a catchable species would
+out-score the weakest member against his six, grinds the grass it spawns on to catch it, swaps
+it in at the next Center, and rematches; that grind is on Victory Road for Teddiursa as of this
+commit. After both bosses it emits `done` and the supervisor stops. Per-fix findings are in
+`agent/HANDOFF.md`, the run log in `agent/PROGRESSION.md`.
 
 ## Running it
 

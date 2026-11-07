@@ -7,7 +7,7 @@ It plays through the actual UI the way a person would. The only RAM writes are f
 tests and dev tools, never gameplay shortcuts.
 
 This file is the map: which module and which symbol holds a thing, so a lookup is a targeted
-read or one `grep -n "def <name>"`, never a cold sweep of the 3600-line `play.py` and 40-odd
+read or one `grep -n "def <name>"`, never a cold sweep of the 4000-line `play.py` and 30-odd
 modules. When this file and the code disagree, the code wins and this file is stale.
 
 ## What it has played
@@ -16,7 +16,10 @@ The run went 8 Hoenn gyms, then the ferry to the Sevii Islands for the 8 Johto l
 places there (16 badges, the count the League guard reads), then Victory Road, the Elite Four,
 and the Champion. The Hall of Fame saves the game to a flash file and the title screen's Continue
 restores it. Two post-game bosses remain in the ladder, Steven in Meteor Falls and Red in Shoal
-Cave, each a team of six at L100. After them the planner emits `done` and the supervisor stops.
+Cave, each a team of six at L100. Steven has three wins over the current six, tallied in
+`states/boss_losses.json`, and the planner answers a loss by pricing the retry and grinding for
+a catch that out-scores the weakest member (the ladder below). After both bosses the planner
+emits `done` and the supervisor stops.
 
 ## Control flow
 
@@ -65,11 +68,16 @@ The state files under `states/`:
 - `grind_blocked.json` is the set of grass maps the executor gave up reaching.
 - `gym_closed.json` is gyms recorded unclearable, with the condition that reopens each;
   `gym_losses.json` counts leader losses.
+- `boss_losses.json` is the boss attempt ledger: whiteouts per boss under the party signature
+  that lost them, each attempt's whiteout and rematch time. `planner.boss_losses` prices a
+  retry off the median span, and a changed party restarts the count at zero.
+- `pace.json` keeps the exp and hop-time samples across relaunches, so a fresh run prices a
+  grind against a boss retry with measured numbers.
 - `stuck_hits.json` counts repeated crossing failures per edge toward a gate, keyed with
   `EXECUTOR_CAP_VERSION` so a capability change reopens old gates.
 - `egg_declined.json`, `party_full.json`, `swap_order.json` are team-management ledgers.
 - `speed.ctl` is the stream speed the site's control endpoint last wrote.
-- `fixtures/` are frozen savestates the tests and probes replay (136 at this writing).
+- `fixtures/` are frozen savestates the tests and probes replay (137 files at this writing).
 
 ## Repo layout
 
@@ -106,8 +114,9 @@ The state files under `states/`:
   `FLAG_DEFEATED_ELITE_4`, `FLAG_DEFEATED_METEOR_FALLS_STEVEN`, `FLAG_DEFEATED_RED`.
 - `rowe_state.py` gives typed RAM reads. `class GameState` is the reader the executor holds:
   `position`, `party`, `box`/`boxes`, `in_battle`, `badges` (`VAR_NUM_BADGES`, 0 to 16),
-  `flag`, `var`, `money`, `pokedex`, `battle_points`, `skill_points`, `bag_pocket` and the
-  pocket helpers (`poke_balls`, `medicine`, `tms`, `key_items`, `shop_items`), plus the
+  `flag`, `var`, `money`, `pokedex`, `battle_points`, `skill_points`, `iv_boosts`, `bag_pocket`
+  and the pocket helpers (`poke_balls`, `medicine`, `tms`, `key_items`, `items`, `sellables`,
+  `fossils`, `repels`, `shop_items`), plus the
   battle-screen reads the menu logic turns on (`callback2`, `controller_func`, `chooser`,
   `choosing`, `comm`, `in_move_list`, `in_selection_script`, `move_cursor`, `action_cursor`,
   `party_menu_slot`, `battlers`, `battle_type_flags`, `battle_outcome`, `disabled_move`,
@@ -117,12 +126,15 @@ The state files under `states/`:
   entries, valid for this build only; `self_check` runs at every executor start. Mechanics:
   `move`, `species`, `stats_at`, `level_from_exp`, `type_chart`, `effectiveness`, `evolutions`,
   `level_up_learnset`, `egg_moves`, `tm_learnset`, `tm_move`, `ability_of`, `nature_modifier`,
-  `item_name`, `item_price`. Maps: `map_header`, `map_connections`, `map_warps`,
-  `map_warp_links`, `map_cells`, `metatile_behavior`, `map_objects`, `map_object_scripts`,
-  `map_music`, `map_section`, `is_underwater`, `is_underground`, `is_indoor`, `is_center`,
-  `is_mart`, `wild_land_levels`, `wild_encounters`, `field_items`, `gym_maps`. Trainers:
-  `trainer_pool`, `leader_team`, `leader_build`, `sevii_leader_pools`, `sevii_leader_locations`,
-  `all_trainer_tiles`. Progression: `badge_flags` (badge index, flag, region, leader) and
+  `species_at_level`, `item_name`, `item_price`, `item_sets`. Maps: `map_header`,
+  `map_connections`, `map_warps`, `map_warp_links`, `map_cells`, `metatile_behavior`,
+  `map_objects`, `map_object_scripts`, `map_music`, `map_section`, `is_underwater`,
+  `is_underground`, `is_indoor`, `is_center`, `is_mart`, `wild_land_levels`, `wild_encounters`,
+  `field_items` (item balls), `hidden_items` (the hidden-item BgEvents and their flags),
+  `clerk_marts` (a shop clerk's gate flags and item lists off its script), `gym_maps`. Trainers:
+  `trainer_pool`, `leader_team`, `leader_build`, `boss_build`, `sevii_leader_pools`,
+  `sevii_leader_locations`, `all_trainer_tiles`. Progression: `badge_flags` (badge index, flag,
+  region, leader) and
   `badge_gate_maps`. The routing graph: `world_edges` (the full static graph), `passthroughs`,
   and `dive_script_edges`, which decodes each map's dive-warp script for the `setdivewarp`
   targets the connection and warp tables never carry.
@@ -183,18 +195,27 @@ The state files under `states/`:
   1. 8 Hoenn badges in and a Johto leader unbeaten means the Sevii leg (`sevii_goal`): route to
      the lowest-indexed unbeaten gym from the badge table over the ferry layer, else explore
      toward the nearest unvisited map so the graph grows, never grind.
-  2. A party short of six or a lowest attacker under the badge level cap (`CAPS`) means grind
-     on `grind_map` (visited grass ranked by hops to the anchor, then by ROM wild level).
-  3. All 16 gyms down means travel along `ENDGAME_CHAIN` (Victory Road, League 1F, the halls
+  2. A fossil in the bag with Rustboro on the known map means the Devon revive errand
+     (`FOSSIL_FAIL_CAP` short tries before it is dropped for the run).
+  3. A party short of six or a lowest attacker under the badge level cap (`CAPS`) means grind
+     on `grind_map` (visited grass ranked by hops to the anchor, then by ROM wild level). Past
+     the game clear the cap is the party's own top level.
+  4. All 16 gyms down means travel along `ENDGAME_CHAIN` (Victory Road, League 1F, the halls
      and the Elite Four rooms in order, the Hall of Fame) to the first map not yet reached that
      has a route; no route from inside the League holds the travel goal for the door; no route
      from outside explores toward it.
-  4. Champion set means travel to the first unbeaten `POSTGAME` boss, Steven then Red, reading
-     `status["boss_flags"]`; both beaten means `{"mode": "done"}`.
-  5. Otherwise the nearest unbeaten Hoenn gym reachable over the graph, or explore toward the
+  5. Champion set means the first unbeaten `POSTGAME` boss, Steven then Red, off
+     `status["boss_flags"]`. Ahead of the fight, a species the party can reach and catch whose
+     summed damage edge against the boss's six beats the weakest member's by `CATCH_MARGIN`
+     sets a coverage grind on its grass (`catch_target`), ended by the catch; a lowest attacker
+     under the party's top level grinds; otherwise travel to the boss room, or explore toward
+     it with no route. Each loss is priced from `boss_losses.json` (`boss_losses`). Both beaten
+     means `{"mode": "done"}`.
+  6. Otherwise the nearest unbeaten Hoenn gym reachable over the graph, or explore toward the
      nearest when none is.
   Supporting: `unbeaten_gyms`, `nearest_gym`, `still_closed`/`closed_gyms`, `hops_from`,
-  `blocked_grinds`, `planning_anchor`, `leader_stand`, `league_flags`, `build_graph` (the one
+  `blocked_grinds`, `planning_anchor`, `leader_stand`, `league_flags`, `catch_target`,
+  `boss_losses`, `party_signature`, `build_graph` (the one
   factory both the planner and the executor use, with `script_layer` for the ferry arms under
   the held tickets and the sailors the ROM has removed). Tables: `GYM_BADGE`, `JOHTO_GYM`,
   `GYM_STAND`, `ENDGAME_ROOMS`, `VICTORY_ROAD`, `ENDGAME_CHAIN`, `POSTGAME`, `SEVII_ENTRY`,
@@ -203,9 +224,11 @@ The state files under `states/`:
   - Frame I/O and waits: `run`, `tap`, `loop`, `wait_until`, `press_until`; `drive()` and
     `main()` wrap it with the flash save, the streamer and the exit handling.
   - Overworld dispatch: `overworld_step` is the per-tick router. In order it runs the lead swap,
-    the heal and restock errands, `scene_step`, `league_step`, `boss_step`, `collect_step`, then
-    the goal handler: `travel_toward`, `explore_step`, `gym_step`, or the grind walk.
-    `demote_to_grind` and `grind_wild_top` cover the fallbacks.
+    the heal and restock errands, the Department Store TM trip, `scene_step`, `league_step`,
+    `boss_step`, `collect_step` (item balls and hidden items on the current map), `fossil_step`
+    on an errand goal, then the goal handler: `travel_toward`, `explore_step`, `gym_step`, or
+    the grind walk, with `maybe_repel` ahead of a travel or explore step. `demote_to_grind` and
+    `grind_wild_top` cover the fallbacks.
   - Endgame: `league_step` heals and buys the League list at the lobby (`league_shopping_list`,
     `LEAGUE_BUYS`), challenges each Elite Four trainer whose flag is down (`ELITE_FLAGS`,
     `ELITE_STAND`), takes the far door once a room is won, and presses A through the Hall of
@@ -235,20 +258,24 @@ The state files under `states/`:
     `keep_snapshot`, `GoalExit`, `hold_stale`, `say`, `_apply_speed_ctl`.
   - Gym bookkeeping: `gym_stand`, `record_closed_gym`, `record_gym_loss`, `note_gym_loss`,
     `_close_signature`.
-  - Team management: `fill_party`, `do_pc_swap`, `do_swap_order`, `teach_tms`, `teach_egg_moves`,
-    `scoring_builds`, `refresh_wanted`, `next_leader_type`, `unbeaten_leaders`, `SwapLedger`.
-    Module-level scorers: `team_score`, `matchup`, `wanted_types`, `tm_assignments`,
-    `egg_assignments`, `best_swap`, `best_fill`, `shopping_list`, `league_shopping_list`,
-    `field_tools`, `service_towns`, `gym_routes`, `gym_map_set`.
+  - Team management: `fill_party`, `do_pc_swap`, `do_swap_order`, `teach_tms`, `plan_tm_trip`,
+    `teach_egg_moves`, `scoring_builds`, `refresh_wanted`, `next_leader_type`,
+    `unbeaten_leaders`, `SwapLedger`. Module-level scorers: `team_score`, `matchup`,
+    `wanted_types`, `tm_assignments`, `tm_shopping`, `egg_assignments`, `best_swap`, `best_fill`,
+    `shopping_list`, `league_shopping_list`, `field_tools`, `service_towns`, `gym_routes`,
+    `gym_map_set`.
 - `routines.py` is the multi-map errands built on nav. `class Errands`: `cross_edge`/`take_dive`/
   `take_warp`/`enter_warp`/`leave_by_warp`/`fall_through`/`descend_gym`/`take_warp_chain` drive a
   map transition; `talk_warp`/`talk_menu`/`peek_menu`/`_menu_rows` drive a scripted crossing
   through its dialogue and menu (the Seagallop ferry rows, read off the EWRAM list the game
   draws); `heal_at`/`talk_to_nurse` a Center run; `restock_at`/`buy_from_list`/`open_buy_list`/
-  `buy_at_counter` a Mart or the League clerk; `swap_at_pc`/`withdraw_at_pc` the PC box;
+  `buy_at_counter` a Mart or the League clerk, `sell_at_counter` the Mart's sell branch,
+  `buy_tms_at_dept_store` the Lilycove 4F TM climb by the stairs; `revive_fossil_at` the Devon
+  reviver; `swap_at_pc`/`withdraw_at_pc`/`deposit_at_pc` the PC box;
   `challenge_leader`/`gym_sweep`/`follow_route` the gym fights and recorded puzzle routes;
-  `collect_item` a ground item; `teach_tm_in_field`/`teach_egg_move_at_nurse`/
-  `use_hp_item_in_field` the field uses; `lead_with`/`spend_skill_points` the party chores.
+  `collect_item` an item ball or a hidden item; `teach_tm_in_field`/`teach_egg_move_at_nurse`/
+  `use_hp_item_in_field`/`use_item_in_field` the field uses; `lead_with`/`spend_skill_points`
+  the party chores.
   `landing_rank` scores a warp's step-off tile.
 
 ### Orchestration and config
@@ -290,7 +317,7 @@ the double-battle stall, ice timing. They are kept rather than deleted so the re
 each fix stays readable.
 
 ### Tests
-`test_*.py` are behavior pins, 112 files and 276 pytest cases, most run against the real ROM
+`test_*.py` are behavior pins, 128 files and 329 pytest cases, most run against the real ROM
 tables and frozen fixtures rather than mocks. Each docstring names the live misplay it locks
 down: the action-grid wedge, the 0-PP selection-script loop, the double-battle action gate,
 surf-dismount refusals, the exp-lead switch, catch policy, the objective ladder, the Sevii legs
@@ -328,6 +355,13 @@ before a swap; the unit tests are the finer pins under it. Some pins are also sc
 - The post-game: `planner.POSTGAME`, `play.BOSSES`, `play.Player.boss_step`, `play.DONE_EXIT`.
 - Team building: `play.team_score`/`best_swap`/`tm_assignments`, applied by
   `play.Player.do_pc_swap`/`fill_party`/`teach_tms`.
+- Shopping: `play.shopping_list` and `routines.Errands.restock_at`/`sell_at_counter` for the
+  Mart; `play.tm_shopping`/`Player.plan_tm_trip` and `routines.Errands.buy_tms_at_dept_store`
+  for the Lilycove TMs, stock read by `rowe_rom.clerk_marts`.
+- Items on the ground: `rowe_rom.field_items`/`hidden_items`, `play.Player.collect_step`,
+  `routines.Errands.collect_item`.
+- A boss loss and its retry price: `play.Player.note_boss_loss`, `planner.boss_losses`,
+  `planner.catch_target` for the coverage grind.
 - The live save and its ring: `rowe_live`, `find_best_state.py`.
 - Stream speed: `stream_sink.FrameStreamer.set_speed`, `play.Player._apply_speed_ctl`,
   `states/speed.ctl`.
@@ -355,9 +389,13 @@ portal it names instead of gating the edge.
 ## Current build state
 
 16 badges, Champion flag set. The live run is past the Hall of Fame ceremony and the credits, with
-the Continue restoring the flash save at the player's house, and the planner's next goals are the
-two post-game bosses, Steven at `(24,107)` and Red at `(24,51)`. After both the planner emits
-`done` and `run-grind.sh` stops for good. The suite is green (`pytest` 276 collected).
+the Continue restoring the flash save at the player's house. The post-game bosses, Steven at
+`(24,107)` and Red at `(24,51)`, are open; Steven has three wins over the current six, and the
+planner's goal as of this commit is a coverage grind on Victory Road to catch a Teddiursa whose
+edge against his six beats the weakest member's. After both bosses the planner emits `done` and
+`run-grind.sh` stops for good. `pytest` collects 329; one pin,
+`test_catch_endgame.py::test_all_gyms_down_with_no_wanted_draws_no_catch_plan`, is red and was
+red before the current build.
 
 ## Building and running
 
