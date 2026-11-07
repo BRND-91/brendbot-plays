@@ -16,6 +16,8 @@ import hashlib
 import json
 import os
 
+import script_decode
+
 Node = tuple  # (map_group, map_num)
 MAP_DYNAMIC = (127, 127)  # a dynamic-warp header: no edge, the real dest resolves at runtime
 
@@ -74,7 +76,7 @@ class MapGraph:
     def set_script(self, script: dict) -> None:
         """Replace the script-warp layer, whole: it is a function of the held key items, so a Sevii
         ticket handed over mid-run re-derives it rather than patching one arm."""
-        self.script: dict = {k: {d: frozenset(f) for d, f in v.items()} for k, v in script.items()}
+        self.script: dict = {k: {d: frozenset(frozenset(a) for a in gates) for d, gates in v.items()} for k, v in script.items()}
 
     def load(self) -> None:
         if not os.path.exists(self.path):
@@ -113,8 +115,9 @@ class MapGraph:
         os.replace(tmp, self.path)
 
     def _script_dests(self, node: Node) -> set:
-        """Script-warp destinations of node whose gate flags are all currently set."""
-        return {d for d, gate in self.script.get(node, {}).items() if gate <= self.flags}
+        """Script-warp destinations of node w/ one gate alternative holding under the live flags
+        (script_decode.gate_holds: positive ids set, negative ids clear)."""
+        return {d for d, gates in self.script.get(node, {}).items() if script_decode.gate_holds(gates, self.flags)}
 
     def neighbors(self, node: Node) -> set:
         out = self.adj.get(node, set()) | self.world.get(node, set()) | self._script_dests(node)

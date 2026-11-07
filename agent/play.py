@@ -846,6 +846,9 @@ class Player:
         self.mart_trek = False  # the list alone justifies walking to town, else it waits for a heal run
         self.tm_wants = []  # [(4F clerk tile, [(TM item id, 1)])] from tm_shopping after each heal visit
         self.tm_trek = False  # a non-empty tm_wants walks to Lilycove and climbs the Department Store
+        # maps landed on during a Mart or TM trek; one recurring CYCLE_HITS times in the window drops the
+        # trek, since a trek runs under a grind goal where the explore cycle check never looks
+        self._trek_lands: collections.deque = collections.deque(maxlen=CYCLE_WINDOW)
         self._fossil_fails = 0  # revive attempts that came back short; planner.FOSSIL_FAIL_CAP ends the errand
         self._lobby_stocked = False  # the League lobby's nurse and clerk visited this entry; a whiteout resets it
         self._cutscene_cb2 = None  # last non-field callback logged by cutscene_step
@@ -2238,10 +2241,23 @@ class Player:
         clerks = [((x, y), max(lists, key=len) if all(self.g.flag(f) for f in flags) else min(lists, key=len))
                   for x, y, flags, lists in rowe_rom.clerk_marts(*DEPT_STORE_4F)]
         self.tm_wants = tm_shopping(party, self.g.iv_boosts(), self.g.tms(), self.g.money(), clerks, self.scoring_builds()[0])
-        self.tm_trek = bool(self.tm_wants)
+        here = self.g.position()[2:]
+        routable = here == LILYCOVE or self.graph.route(here, LILYCOVE, field_moves=frozenset(self.field_moves())) is not None
+        self.tm_trek = bool(self.tm_wants) and routable
+        self._trek_lands.clear()
+        if self.tm_wants and not routable:
+            print(f"tm trip: no route from {list(here)} to Lilycove, waiting for the next heal visit", flush=True)
         if self.tm_wants:
             print(f"tm trip: {[(t, [rowe_rom.item_name(i) for i, _ in rows]) for t, rows in self.tm_wants]}, "
                   f"money {self.g.money()}", flush=True)
+
+    def _trek_cycling(self, here: tuple) -> bool:
+        """True when a Mart or TM trek has landed on `here` CYCLE_HITS times inside the last
+        CYCLE_WINDOW landings, the One Island dock to Slateport harbor and back loop that a trek under
+        a grind goal otherwise walks until the wall clock ends the run."""
+        if not self._trek_lands or self._trek_lands[-1] != here:
+            self._trek_lands.append(here)
+        return sum(1 for m in self._trek_lands if m == here) >= CYCLE_HITS
 
     def teach_egg_moves(self) -> None:
         """At the blue nurse after the PC and the TMs: egg moves that close a wanted type, TEACH_EGG_BP
@@ -3309,9 +3325,15 @@ class Player:
                 # the Mart warp is unreachable from this tile: stop the trek and fall through to
                 # normal nav so the player moves off the spot instead of re-running the blocked warp
                 self.mart_trek = False
+            if self.mart_trek and self._trek_cycling(here):
+                print(f"mart trek: {list(here)} landed {CYCLE_HITS}x in {CYCLE_WINDOW} crossings, trek dropped", flush=True)
+                self.mart_trek = False
             if self.mart_trek:
                 self.travel_toward(town, self._door_tiles(town, SERVICE[town][1]))
                 return
+        if self.tm_trek and self._trek_cycling(here):
+            print(f"tm trip: {list(here)} landed {CYCLE_HITS}x in {CYCLE_WINDOW} crossings, trek dropped", flush=True)
+            self.tm_trek = False
         if self.tm_trek:
             if here == LILYCOVE or here in DEPT_STORE_CLIMB:
                 bought = self.errands.buy_tms_at_dept_store(self.tm_wants, surf="SURF" in self.field_moves())

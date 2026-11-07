@@ -16,9 +16,9 @@ The run went 8 Hoenn gyms, then the ferry to the Sevii Islands for the 8 Johto l
 places there (16 badges, the count the League guard reads), then Victory Road, the Elite Four,
 and the Champion. The Hall of Fame saves the game to a flash file and the title screen's Continue
 restores it. Two post-game bosses remain in the ladder, Steven in Meteor Falls and Red in Shoal
-Cave, each a team of six at L100. Steven has three wins over the current six, tallied in
-`states/boss_losses.json`, and the planner answers a loss by pricing the retry and grinding for
-a catch that out-scores the weakest member (the ladder below). After both bosses the planner
+Cave, each a team of six at L100. Steven has three wins over an earlier six, tallied in
+`states/boss_losses.json` under that party's signature, and the planner answers a loss by pricing
+the retry and grinding for a catch that out-scores the weakest member (the ladder below). After both bosses the planner
 emits `done` and the supervisor stops.
 
 ## Control flow
@@ -390,7 +390,7 @@ portal it names instead of gating the edge.
 
 16 badges, Champion flag set. The live run is past the Hall of Fame ceremony and the credits, with
 the Continue restoring the flash save at the player's house. The post-game bosses, Steven at
-`(24,107)` and Red at `(24,51)`, are open; Steven has three wins over the current six, and the
+`(24,107)` and Red at `(24,51)`, are open; Steven has three wins over an earlier six, and the
 planner's goal as of this commit is a coverage grind on Victory Road to catch a Teddiursa whose
 edge against his six beats the weakest member's. After both bosses the planner emits `done` and
 `run-grind.sh` stops for good. `pytest` collects 329; one pin,

@@ -271,7 +271,9 @@ _GOTO, _CALL, _GOTO_IF, _CALL_IF = 0x05, 0x04, 0x06, 0x07
 
 def _warp_paths(addr: int, _budget: int = 80000) -> list:
     """(dest_map, warp_id, gate) for every warp reachable from addr, gate being the frozenset of flags
-    that must be SET along the control-flow path that reaches that warp. A conditional branch splits
+    the control-flow path to that warp needs: a positive id must be SET, a negative id `-f` means
+    flag f must be UNSET (the One Island dock sailor sails to the Lilycove harbor while flag 68 is
+    down and to the Slateport harbor once it is up, so the Lilycove arm carries -68). A conditional branch splits
     into its taken and fall-through paths, each carrying its own flag requirement, so a branch-local
     checkflag gates only the warps on that branch (the progressive island unlocks) and not every warp
     that happens to follow a checkflag in block order. A moving warp (name warp*) ends its path; a
@@ -334,7 +336,7 @@ def _warp_paths(addr: int, _budget: int = 80000) -> list:
                 fo, flag = argfo + arg_len, None
                 continue
             elif "warp" in name:
-                out.append(((rom[argfo], rom[argfo + 1]), rom[argfo + 2], req))
+                out.append(((rom[argfo], rom[argfo + 1]), rom[argfo + 2], req | {-f for f in forb}))
                 if name.startswith("warp"):
                     break
                 fo, flag = argfo + arg_len, None
@@ -345,38 +347,51 @@ def _warp_paths(addr: int, _budget: int = 80000) -> list:
     return out
 
 
+def _prune(alts: set) -> frozenset:
+    """The gate alternatives w/o any that needs a superset of another's flags, since a path open under
+    the smaller gate is open whenever the larger one is."""
+    return frozenset(a for a in alts if not any(b < a for b in alts))
+
+
 def _script_warps(addr: int) -> list:
-    """(dest_map, gate) per warp reachable from addr, keeping the least-restrictive gate per dest.
-    Gate is the flags required set on the control-flow path to the warp (see _warp_paths)."""
-    best = {}
+    """(dest_map, gates) per warp reachable from addr, gates the frozenset of alternative gate sets,
+    one per control-flow path (see _warp_paths), dominated ones dropped. A warp is open when any one
+    alternative holds: the Slateport dock's island rows sit on a flag-3284 set branch and a 3284
+    unset branch alike, so the two alternatives {3284} and {-3284} make the row ungated."""
+    alts = {}
     for dest, _wid, gate in _warp_paths(addr):
-        if dest not in best or len(gate) < len(best[dest]):
-            best[dest] = gate
-    return list(best.items())
+        alts.setdefault(dest, set()).add(gate)
+    return [(dest, _prune(a)) for dest, a in alts.items()]
 
 
 @lru_cache(maxsize=1)
 def script_edges() -> dict:
-    """{(group,num): {(dest_group,dest_num): frozenset(gate_flag_ids)}} for every event script that
-    reaches a warp command. The least-restrictive gate is kept when a destination has more than one
-    path. These are the NPC-interaction crossings (the Seagallop ferry) that world_edges misses,
-    since it reads only the connection and warp-event tables, never a script's warp command."""
+    """{(group,num): {(dest_group,dest_num): frozenset of gate alternatives}} for every event script
+    that reaches a warp command, each alternative a frozenset of flag ids, positive for set and
+    negative for unset. These are the NPC-interaction crossings (the Seagallop ferry) that
+    world_edges misses, since it reads only the connection and warp-event tables, never a script's
+    warp command."""
     out = {}
     for g in range(R.MAP_GROUP_COUNT):
         for n in range(R.map_count(g)):
             dests = out.setdefault((g, n), {})
             for addr in _entry_scripts(g, n):
-                for dest, gate in _script_warps(addr):
-                    if dest not in dests or len(gate) < len(dests[dest]):
-                        dests[dest] = gate
+                for dest, gates in _script_warps(addr):
+                    dests[dest] = _prune(set(dests.get(dest, frozenset())) | set(gates))
     return {src: d for src, d in out.items() if d}
+
+
+def gate_holds(gates: frozenset, flags) -> bool:
+    """True when one alternative of `gates` holds under the set flag ids `flags`: each positive id in
+    it set, each negative id's flag clear."""
+    return any(all(f in flags if f > 0 else -f not in flags for f in alt) for alt in gates)
 
 
 @lru_cache(maxsize=1)
 def gate_flags() -> frozenset:
-    """Every flag id that gates at least one script edge, so a live run reads just these from the
-    emulator to decide which NPC-interaction crossings are open this frame."""
-    return frozenset(f for d in script_edges().values() for gate in d.values() for f in gate)
+    """Every flag id that gates at least one script edge, set or unset, so a live run reads just these
+    from the emulator to decide which NPC-interaction crossings are open this frame."""
+    return frozenset(abs(f) for d in script_edges().values() for gates in d.values() for alt in gates for f in alt)
 
 
 # pokeemerald MOVEMENT_TYPE_FACE_{UP,DOWN,LEFT,RIGHT} -> the offset from the object to the tile you

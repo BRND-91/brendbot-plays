@@ -57,8 +57,9 @@ event scripts and driven through their dialogue menus.
 16 badges, Champion. The run cleared the 8 Hoenn gyms, the 8 Johto leaders on the Sevii
 Islands, Victory Road, the Elite Four, and Wallace, and the Hall of Fame save restored through
 the title screen's Continue. The two post-game bosses, Steven in Meteor Falls and Red in Shoal
-Cave, are open. Steven has beaten the party three times under its current six, so the planner
-prices each retry off the measured whiteout-to-rematch span and, when a catchable species would
+Cave, are open. Steven beat an earlier six three times; the party has changed since, which
+restarts his count, and the planner prices each retry off the measured whiteout-to-rematch span
+and, when a catchable species would
 out-score the weakest member against his six, grinds the grass it spawns on to catch it, swaps
 it in at the next Center, and rematches; that grind is on Victory Road for Teddiursa as of this
 commit. After both bosses it emits `done` and the supervisor stops. Per-fix findings are in

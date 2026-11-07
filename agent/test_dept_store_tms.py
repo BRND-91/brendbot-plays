@@ -31,3 +31,15 @@ def test_tm_shopping_buys_the_assignment_within_budget_and_skips_a_bag_copy():
     assert tm_shopping(mons, NO_IVS, [], price + MONEY_RESERVE, clerks, DRAGON_BUILD) == [((7, 6), [(TM13_ICE_BEAM, 1)])]
     assert tm_shopping(mons, NO_IVS, [], price + MONEY_RESERVE - 1, clerks, DRAGON_BUILD) == [], "the reserve is never spent"
     assert tm_shopping(mons, NO_IVS, [(TM13_ICE_BEAM, 1)], 10 ** 6, clerks, DRAGON_BUILD) == [], "a bag copy is taught, not bought"
+
+
+def test_a_trek_landing_on_one_map_four_times_in_the_window_is_cycling():
+    import collections
+    import play
+    p = play.Player.__new__(play.Player)
+    p._trek_lands = collections.deque(maxlen=play.CYCLE_WINDOW)
+    ONE_ISLAND, HARBOR = (0, 75), (9, 9)
+    hits = [p._trek_cycling(m) for m in (ONE_ISLAND, HARBOR) * 4]
+    assert hits[:6] == [False] * 6 and hits[6] is True, hits
+    p._trek_lands.clear()
+    assert all(not p._trek_cycling(m) for m in [(0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (0, 7), (0, 8)]), "new maps never read as a cycle"

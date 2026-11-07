@@ -23,9 +23,10 @@ def _gated_edge():
     so a flag toggle is the only thing that can move it in or out of neighbors."""
     base = _graph(set())
     for src, dests in SE.items():
-        for dest, gate in dests.items():
-            if gate and dest[0] in (24, 25, 26) and dest not in base.world.get(src, set()) | base.adj.get(src, set()):
-                return src, dest, gate
+        for dest, gates in dests.items():
+            alt = next((a for a in gates if a and all(f > 0 for f in a)), None)
+            if alt and dest[0] in (24, 25, 26) and dest not in base.world.get(src, set()) | base.adj.get(src, set()):
+                return src, dest, alt
     raise AssertionError("no flag-gated Sevii script edge found")
 
 
@@ -49,8 +50,8 @@ def test_ungated_ferry_edge_is_always_present():
 
 def test_seagallop_edge_in_layer():
     # the main ferry dock maps reach a (25,*) dock gated by flag 0xCE8
-    gated_25 = [(src, dest) for src, dests in SE.items() for dest, gate in dests.items()
-                if dest[0] == 25 and 0xCE8 in gate]
+    gated_25 = [(src, dest) for src, dests in SE.items() for dest, gates in dests.items()
+                if dest[0] == 25 and any(0xCE8 in a for a in gates)]
     assert gated_25, "no 0xCE8-gated (25,*) crossing in the script layer"
 
 
@@ -58,7 +59,7 @@ def test_route_crosses_ferry_as_last_hop():
     # port selection is route's job: a Hoenn start reaches (25,24) only with the ferry gate set, and
     # the dock->(25,24) hop is the script edge, since no world or learned edge carries (25,24).
     dock, dest = (2, 3), (25, 24)
-    on = _graph(set(SE[dock][dest]))
+    on = _graph(set(min(SE[dock][dest], key=len)))
     on.cur_badges = 8
     off = _graph(set())
     off.cur_badges = 8
@@ -75,9 +76,9 @@ def test_branch_gate_keeps_shared_and_branch_flags():
     # only the shared one. Red-capable: a nearest-preceding gate drops 0xCD1 from the 0xCE8 edges and
     # the shared-flag assertion goes red.
     edges = SE[(2, 3)]
-    assert all(0xCD1 in g for g in edges.values()), {d: sorted(g) for d, g in edges.items()}
-    assert edges[(25, 60)] == frozenset({0xCD1})
-    assert edges[(25, 26)] == frozenset({0xCD1, 0xCE8})
+    assert all(0xCD1 in a for g in edges.values() for a in g), {d: sorted(map(sorted, g)) for d, g in edges.items()}
+    assert edges[(25, 60)] == frozenset({frozenset({0xCD1})})
+    assert edges[(25, 26)] == frozenset({frozenset({0xCD1, 0xCE8})})
 
 
 def test_talk_object_resolves_dock_sailor():
@@ -124,3 +125,20 @@ if __name__ == "__main__":
     test_talk_object_resolves_dock_sailor()
     test_menu_sequence_distinguishes_dock_destinations()
     print("SCRIPT EDGES PASS", flush=True)
+
+
+def test_an_unset_branch_gates_its_warp_on_the_flag_being_down():
+    """The One Island dock sailor (0,75) sails to the Lilycove harbor (13,10) while flag 68 is down and
+    to the Slateport harbor (9,9) once it is up. The live run held flag 68, routed the ungated Lilycove
+    arm, and the sailor landed it at Slateport 126 times in one run. Red-capable: drop the `-f for f in
+    forb` term in _warp_paths and the Lilycove gate reads empty, so it is a neighbor under {68}."""
+    ONE_ISLAND, LILYCOVE_HARBOR, SLATEPORT_HARBOR, SAILED_FLAG = (0, 75), (13, 10), (9, 9), 68
+    assert SE[ONE_ISLAND][LILYCOVE_HARBOR] == frozenset({frozenset({-SAILED_FLAG})})
+    assert SE[ONE_ISLAND][SLATEPORT_HARBOR] == frozenset({frozenset({SAILED_FLAG})})
+    # the Slateport dock's island rows sit on both branches of flag 3284, so the pair reads ungated
+    assert SE[SLATEPORT_HARBOR][(0, 76)] == frozenset({frozenset({3284}), frozenset({-3284})})
+    assert script_decode.gate_holds(SE[SLATEPORT_HARBOR][(0, 76)], set()) and script_decode.gate_holds(SE[SLATEPORT_HARBOR][(0, 76)], {3284})
+    assert SAILED_FLAG in script_decode.gate_flags() and -SAILED_FLAG not in script_decode.gate_flags()
+    up, down = _graph({SAILED_FLAG}), _graph(set())
+    assert SLATEPORT_HARBOR in up.neighbors(ONE_ISLAND) and LILYCOVE_HARBOR not in up.neighbors(ONE_ISLAND)
+    assert LILYCOVE_HARBOR in down.neighbors(ONE_ISLAND) and SLATEPORT_HARBOR not in down.neighbors(ONE_ISLAND)
